@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# 配置 Jinja2 以避免与 Vue.js 语法冲突
+app.jinja_env.variable_start_string = '[['
+app.jinja_env.variable_end_string = ']]'
+
 # 全局变量
 scheduler_thread = None
 scheduler_running = False
