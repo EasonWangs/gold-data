@@ -1,4 +1,0 @@
-{
-  "webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=59aad63a6657446d486ebc0c902d8572623f3d78a4071695099ffb2166f129e3",
-  "description": "请将YOUR_ACCESS_TOKEN替换为您的钉钉机器人access_token"
-}
