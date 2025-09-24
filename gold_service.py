@@ -38,14 +38,16 @@ service_status = {
 
 class GoldService:
     def __init__(self):
-        self.webhook_url = self.load_dingtalk_config()
+        config = self.load_dingtalk_config()
+        self.webhook_url = config.get('webhook_url') if config else None
+        self.link_url = config.get('link_url', 'http://127.0.0.1:5080') if config else 'http://127.0.0.1:5080'
 
     def load_dingtalk_config(self):
         """加载钉钉配置"""
         try:
             with open('dingtalk_config.json', 'r', encoding='utf-8') as f:
                 config = json.load(f)
-                return config.get('webhook_url')
+                return config
         except FileNotFoundError:
             logger.warning("钉钉配置文件不存在")
             return None
@@ -99,19 +101,29 @@ class GoldService:
             logger.error(f"获取黄金价格数据失败: {e}")
             return None
 
-    def send_dingtalk_message(self, message):
+    def send_dingtalk_message(self, message, use_markdown=True):
         """发送钉钉消息"""
         if not self.webhook_url:
             logger.error("webhook地址未配置，无法发送消息")
             return False
 
         headers = {'Content-Type': 'application/json'}
-        data = {
-            "msgtype": "text",
-            "text": {
-                "content": message
+
+        if use_markdown:
+            data = {
+                "msgtype": "markdown",
+                "markdown": {
+                    "title": "黄金价格播报",
+                    "text": message
+                }
             }
-        }
+        else:
+            data = {
+                "msgtype": "text",
+                "text": {
+                    "content": message
+                }
+            }
 
         try:
             response = requests.post(self.webhook_url, headers=headers, data=json.dumps(data))
@@ -148,25 +160,29 @@ class GoldService:
             today = datetime.now().strftime('%Y-%m-%d')
             hist_data = data['history']
 
-            message = f"""📈 黄金开盘价格播报 📈
+            message = f"""# 📈 黄金开盘价格播报 📈
 
-📅 日期: {today}
-🏅 品种: Au99.99 (上海黄金交易所)
-💰 开盘价: {hist_data.get('open', 'N/A')} 元/克
+**📅 日期:** {today}
+**🏅 品种:** Au99.99 (上海黄金交易所)
+**💰 开盘价:** {hist_data.get('open', 'N/A')} 元/克
 
-⏰ 推送时间: {datetime.now().strftime('%H:%M:%S')}
-📊 数据来源: 上海黄金交易所"""
+**⏰ 推送时间:** {datetime.now().strftime('%H:%M:%S')}
+**📊 数据来源:** 上海黄金交易所
+
+🔗 [查看详细数据]({self.link_url})"""
 
             self.send_dingtalk_message(message)
             global service_status
             service_status['last_push'] = datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
             service_status['push_count'] += 1
         else:
-            error_msg = f"""❌ 黄金价格数据获取失败
+            error_msg = f"""# ❌ 黄金价格数据获取失败
 
-📅 日期: {datetime.now().strftime('%Y-%m-%d')}
-⏰ 时间: {datetime.now().strftime('%H:%M:%S')}
-🔧 请检查数据源连接"""
+**📅 日期:** {datetime.now().strftime('%Y-%m-%d')}
+**⏰ 时间:** {datetime.now().strftime('%H:%M:%S')}
+**🔧 状态:** 请检查数据源连接
+
+🔗 [服务状态]({self.link_url})"""
             self.send_dingtalk_message(error_msg)
 
     def push_closing_price(self):
@@ -195,45 +211,51 @@ class GoldService:
             # 涨跌表情
             trend_emoji = "📈" if change > 0 else "📉" if change < 0 else "➡️"
 
-            message = f"""💼 黄金收盘价格播报 💼
+            message = f"""# 💼 黄金收盘价格播报 💼
 
-📅 日期: {today}
-🏅 品种: Au99.99 (上海黄金交易所)
+**📅 日期:** {today}
+**🏅 品种:** Au99.99 (上海黄金交易所)
 
-💰 开盘价: {hist_data.get('open', 'N/A')} 元/克
-💰 收盘价: {hist_data.get('close', 'N/A')} 元/克
-📊 最高价: {hist_data.get('high', 'N/A')} 元/克
-📊 最低价: {hist_data.get('low', 'N/A')} 元/克
+**💰 开盘价:** {hist_data.get('open', 'N/A')} 元/克
+**💰 收盘价:** {hist_data.get('close', 'N/A')} 元/克
+**📊 最高价:** {hist_data.get('high', 'N/A')} 元/克
+**📊 最低价:** {hist_data.get('low', 'N/A')} 元/克
 
-📈 前一日收盘: {prev_close:.2f} 元/克
-{trend_emoji} 涨跌额: {change:.2f} 元/克
-{trend_emoji} 涨跌幅: {change_percent:.2f}%
+**📈 前一日收盘:** {prev_close:.2f} 元/克
+**{trend_emoji} 涨跌额:** {change:.2f} 元/克
+**{trend_emoji} 涨跌幅:** {change_percent:.2f}%
 
-⏰ 推送时间: {datetime.now().strftime('%H:%M:%S')}
-📊 数据来源: 上海黄金交易所"""
+**⏰ 推送时间:** {datetime.now().strftime('%H:%M:%S')}
+**📊 数据来源:** 上海黄金交易所
+
+🔗 [查看详细数据]({self.link_url})"""
 
             self.send_dingtalk_message(message)
             global service_status
             service_status['last_push'] = datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
             service_status['push_count'] += 1
         else:
-            error_msg = f"""❌ 黄金价格数据获取失败
+            error_msg = f"""# ❌ 黄金价格数据获取失败
 
-📅 日期: {datetime.now().strftime('%Y-%m-%d')}
-⏰ 时间: {datetime.now().strftime('%H:%M:%S')}
-🔧 请检查数据源连接"""
+**📅 日期:** {datetime.now().strftime('%Y-%m-%d')}
+**⏰ 时间:** {datetime.now().strftime('%H:%M:%S')}
+**🔧 状态:** 请检查数据源连接
+
+🔗 [服务状态]({self.link_url})"""
             self.send_dingtalk_message(error_msg)
 
     def test_push(self):
         """测试推送功能"""
         logger.info("测试钉钉推送功能...")
-        test_message = f"""🧪 钉钉推送测试消息
+        test_message = f"""# 🧪 钉钉推送测试消息
 
-⏰ 测试时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-🔧 功能: 黄金价格推送服务
-✅ 状态: 连接正常
+**⏰ 测试时间:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**🔧 功能:** 黄金价格推送服务
+**✅ 状态:** 连接正常
 
-如果您收到此消息，说明钉钉推送功能配置成功！"""
+如果您收到此消息，说明钉钉推送功能配置成功！
+
+🔗 [管理界面]({self.link_url})"""
 
         result = self.send_dingtalk_message(test_message)
         if result:
@@ -272,8 +294,8 @@ def start_scheduler():
         return False
 
     # 设置定时任务
-    schedule.every().day.at("09:02").do(gold_service.push_opening_price)
-    schedule.every().day.at("16:02").do(gold_service.push_closing_price)
+    schedule.every().day.at("09:00").do(gold_service.push_opening_price)
+    schedule.every().day.at("16:00").do(gold_service.push_closing_price)
 
     scheduler_running = True
     scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
@@ -283,8 +305,8 @@ def start_scheduler():
     service_status['start_time'] = datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
 
     logger.info("定时任务设置完成:")
-    logger.info("- 每日09:02推送开盘价格（仅工作日）")
-    logger.info("- 每日16:02推送收盘价格（仅工作日）")
+    logger.info("- 每日09:00推送开盘价格（仅工作日）")
+    logger.info("- 每日16:00推送收盘价格（仅工作日）")
     logger.info("- 周末将自动跳过推送")
 
     return True
@@ -561,8 +583,8 @@ def api_info():
             '/api/info': '服务信息'
         },
         'schedule': {
-            'opening': '工作日 09:02',
-            'closing': '工作日 16:02'
+            'opening': '工作日 09:00',
+            'closing': '工作日 16:00'
         },
         'data_source': '上海黄金交易所',
         'symbol': 'Au99.99'
@@ -572,7 +594,8 @@ def create_dingtalk_config():
     """创建钉钉配置文件"""
     config = {
         "webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=YOUR_ACCESS_TOKEN",
-        "description": "请将YOUR_ACCESS_TOKEN替换为您的钉钉机器人access_token"
+        "link_url": "http://127.0.0.1:5080",
+        "description": "钉钉机器人配置文件"
     }
 
     try:
@@ -596,7 +619,7 @@ if __name__ == '__main__':
     print("🌐 服务地址: http://127.0.0.1:5080")
     print("📋 管理界面: http://127.0.0.1:5080")
     print("📖 API文档: http://127.0.0.1:5080/api/info")
-    print("🔔 钉钉推送: 工作日 09:02 和 16:02")
+    print("🔔 钉钉推送: 工作日 09:00 和 16:00")
     print("-" * 50)
 
     app.run(debug=True, host='0.0.0.0', port=5080)
