@@ -160,14 +160,20 @@ class GoldService:
             today = datetime.now().strftime('%Y-%m-%d')
             hist_data = data['history']
 
+            # 获取前一日收盘价
+            prev_data = data['prev_history']
+            prev_close = prev_data.get('close', 'N/A') if prev_data is not None else 'N/A'
+
             message = f"""# 📈 黄金开盘价格播报 📈
 
-**📅 日期:** {today}
+
+**📅 日期:** {today} {datetime.now().strftime('%H:%M:%S')}
+
 **🏅 品种:** Au99.99 (上海黄金交易所)
+
 **💰 开盘价:** {hist_data.get('open', 'N/A')} 元/克
 
-**⏰ 推送时间:** {datetime.now().strftime('%H:%M:%S')}
-**📊 数据来源:** 上海黄金交易所
+**📊 前日收盘:** {prev_close} 元/克
 
 🔗 [查看详细数据]({self.link_url})"""
 
@@ -178,9 +184,13 @@ class GoldService:
         else:
             error_msg = f"""# ❌ 黄金价格数据获取失败
 
+
 **📅 日期:** {datetime.now().strftime('%Y-%m-%d')}
+
 **⏰ 时间:** {datetime.now().strftime('%H:%M:%S')}
+
 **🔧 状态:** 请检查数据源连接
+
 
 🔗 [服务状态]({self.link_url})"""
             self.send_dingtalk_message(error_msg)
@@ -213,20 +223,18 @@ class GoldService:
 
             message = f"""# 💼 黄金收盘价格播报 💼
 
-**📅 日期:** {today}
+
+**📅 日期:** {today} {datetime.now().strftime('%H:%M:%S')}
+
 **🏅 品种:** Au99.99 (上海黄金交易所)
 
-**💰 开盘价:** {hist_data.get('open', 'N/A')} 元/克
-**💰 收盘价:** {hist_data.get('close', 'N/A')} 元/克
-**📊 最高价:** {hist_data.get('high', 'N/A')} 元/克
-**📊 最低价:** {hist_data.get('low', 'N/A')} 元/克
+**💰 开-收盘价:** {hist_data.get('open', 'N/A')} ~ {hist_data.get('close', 'N/A')} 元/克
+
+**📊 最低-高价:** {hist_data.get('low', 'N/A')} ~ {hist_data.get('high', 'N/A')} 元/克
 
 **📈 前一日收盘:** {prev_close:.2f} 元/克
-**{trend_emoji} 涨跌额:** {change:.2f} 元/克
-**{trend_emoji} 涨跌幅:** {change_percent:.2f}%
 
-**⏰ 推送时间:** {datetime.now().strftime('%H:%M:%S')}
-**📊 数据来源:** 上海黄金交易所
+**{trend_emoji} 涨跌额:** {change:.2f} 元/克 ({change_percent:.2f}%)
 
 🔗 [查看详细数据]({self.link_url})"""
 
@@ -237,9 +245,13 @@ class GoldService:
         else:
             error_msg = f"""# ❌ 黄金价格数据获取失败
 
+
 **📅 日期:** {datetime.now().strftime('%Y-%m-%d')}
+
 **⏰ 时间:** {datetime.now().strftime('%H:%M:%S')}
+
 **🔧 状态:** 请检查数据源连接
+
 
 🔗 [服务状态]({self.link_url})"""
             self.send_dingtalk_message(error_msg)
@@ -249,11 +261,16 @@ class GoldService:
         logger.info("测试钉钉推送功能...")
         test_message = f"""# 🧪 钉钉推送测试消息
 
+
 **⏰ 测试时间:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
 **🔧 功能:** 黄金价格推送服务
+
 **✅ 状态:** 连接正常
 
+
 如果您收到此消息，说明钉钉推送功能配置成功！
+
 
 🔗 [管理界面]({self.link_url})"""
 
