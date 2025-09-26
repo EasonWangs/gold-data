@@ -14,6 +14,7 @@ import threading
 import logging
 from flask import Flask, jsonify, request
 from datetime import datetime
+from push_service import push_manager, MessageTemplate
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -41,6 +42,7 @@ class GoldService:
         config = self.load_dingtalk_config()
         self.webhook_url = config.get('webhook_url') if config else None
         self.link_url = config.get('link_url', 'http://127.0.0.1:5080') if config else 'http://127.0.0.1:5080'
+        self.push_manager = push_manager
 
     def load_dingtalk_config(self):
         """加载钉钉配置"""
@@ -101,46 +103,9 @@ class GoldService:
             logger.error(f"获取黄金价格数据失败: {e}")
             return None
 
-    def send_dingtalk_message(self, message, use_markdown=True):
-        """发送钉钉消息"""
-        if not self.webhook_url:
-            logger.error("webhook地址未配置，无法发送消息")
-            return False
-
-        headers = {'Content-Type': 'application/json'}
-
-        if use_markdown:
-            data = {
-                "msgtype": "markdown",
-                "markdown": {
-                    "title": "黄金价格播报",
-                    "text": message
-                }
-            }
-        else:
-            data = {
-                "msgtype": "text",
-                "text": {
-                    "content": message
-                }
-            }
-
-        try:
-            response = requests.post(self.webhook_url, headers=headers, data=json.dumps(data))
-            if response.status_code == 200:
-                result = response.json()
-                if result.get('errcode') == 0:
-                    logger.info("钉钉消息发送成功")
-                    return True
-                else:
-                    logger.error(f"钉钉消息发送失败: {result.get('errmsg')}")
-                    return False
-            else:
-                logger.error(f"钉钉消息发送失败: HTTP {response.status_code}")
-                return False
-        except Exception as e:
-            logger.error(f"发送钉钉消息异常: {e}")
-            return False
+    def send_message(self, message, service_name=None, **kwargs):
+        """通过推送服务发送消息"""
+        return self.push_manager.send_message(message, service_name, **kwargs)
 
     def is_trading_day(self):
         """判断是否为交易日（排除周六周日）"""
@@ -157,43 +122,34 @@ class GoldService:
         data = self.get_gold_price_data()
 
         if data and data['history'] is not None:
-            today = datetime.now().strftime('%Y-%m-%d')
             hist_data = data['history']
-
-            # 获取前一日收盘价
             prev_data = data['prev_history']
             prev_close = prev_data.get('close', 'N/A') if prev_data is not None else 'N/A'
 
-            message = f"""# 📈 黄金开盘价格播报 📈
+            # 准备消息数据
+            message_data = {
+                'date': datetime.now().strftime('%Y-%m-%d'),
+                'time': datetime.now().strftime('%H:%M:%S'),
+                'symbol': 'Au99.99 (上海黄金交易所)',
+                'open_price': hist_data.get('open', 'N/A'),
+                'prev_close': prev_close,
+                'link_url': self.link_url
+            }
 
+            message = MessageTemplate.format_opening_price_message(message_data)
+            self.send_message(message, title="黄金开盘价格播报")
 
-**📅 日期:** {today} {datetime.now().strftime('%H:%M:%S')}
-
-**🏅 品种:** Au99.99 (上海黄金交易所)
-
-**💰 开盘价:** {hist_data.get('open', 'N/A')} 元/克
-
-**📊 前日收盘:** {prev_close} 元/克
-
-🔗 [查看详细数据]({self.link_url})"""
-
-            self.send_dingtalk_message(message)
             global service_status
             service_status['last_push'] = datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
             service_status['push_count'] += 1
         else:
-            error_msg = f"""# ❌ 黄金价格数据获取失败
-
-
-**📅 日期:** {datetime.now().strftime('%Y-%m-%d')}
-
-**⏰ 时间:** {datetime.now().strftime('%H:%M:%S')}
-
-**🔧 状态:** 请检查数据源连接
-
-
-🔗 [服务状态]({self.link_url})"""
-            self.send_dingtalk_message(error_msg)
+            error_data = {
+                'date': datetime.now().strftime('%Y-%m-%d'),
+                'time': datetime.now().strftime('%H:%M:%S'),
+                'link_url': self.link_url
+            }
+            error_msg = MessageTemplate.format_error_message(error_data)
+            self.send_message(error_msg, title="数据获取失败")
 
     def push_closing_price(self):
         """推送收盘价格"""
@@ -205,12 +161,11 @@ class GoldService:
         data = self.get_gold_price_data()
 
         if data and data['history'] is not None:
-            today = datetime.now().strftime('%Y-%m-%d')
             hist_data = data['history']
+            prev_data = data['prev_history']
 
             # 计算涨跌（相对于前一日收盘价）
             close_price = hist_data.get('close', 0) if hist_data is not None else 0
-            prev_data = data['prev_history']
             prev_close = prev_data.get('close', 0) if prev_data is not None else 0
 
             # 涨跌额 = 今日收盘价 - 前一日收盘价
@@ -221,67 +176,48 @@ class GoldService:
             # 涨跌表情
             trend_emoji = "📈" if change > 0 else "📉" if change < 0 else "➡️"
 
-            message = f"""# 💼 黄金收盘价格播报 💼
+            # 准备消息数据
+            message_data = {
+                'date': datetime.now().strftime('%Y-%m-%d'),
+                'time': datetime.now().strftime('%H:%M:%S'),
+                'symbol': 'Au99.99 (上海黄金交易所)',
+                'open_price': hist_data.get('open', 'N/A'),
+                'close_price': hist_data.get('close', 'N/A'),
+                'low_price': hist_data.get('low', 'N/A'),
+                'high_price': hist_data.get('high', 'N/A'),
+                'prev_close': f"{prev_close:.2f}" if prev_close != 0 else 'N/A',
+                'trend_emoji': trend_emoji,
+                'change': change,
+                'change_percent': change_percent,
+                'link_url': self.link_url
+            }
 
+            message = MessageTemplate.format_closing_price_message(message_data)
+            self.send_message(message, title="黄金收盘价格播报")
 
-**📅 日期:** {today} {datetime.now().strftime('%H:%M:%S')}
-
-**🏅 品种:** Au99.99 (上海黄金交易所)
-
-**💰 开-收盘价:** {hist_data.get('open', 'N/A')} ~ {hist_data.get('close', 'N/A')} 元/克
-
-**📊 最低-高价:** {hist_data.get('low', 'N/A')} ~ {hist_data.get('high', 'N/A')} 元/克
-
-**📈 前一日收盘:** {prev_close:.2f} 元/克
-
-**{trend_emoji} 涨跌额:** {change:.2f} 元/克 ({change_percent:.2f}%)
-
-🔗 [查看详细数据]({self.link_url})"""
-
-            self.send_dingtalk_message(message)
             global service_status
             service_status['last_push'] = datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
             service_status['push_count'] += 1
         else:
-            error_msg = f"""# ❌ 黄金价格数据获取失败
-
-
-**📅 日期:** {datetime.now().strftime('%Y-%m-%d')}
-
-**⏰ 时间:** {datetime.now().strftime('%H:%M:%S')}
-
-**🔧 状态:** 请检查数据源连接
-
-
-🔗 [服务状态]({self.link_url})"""
-            self.send_dingtalk_message(error_msg)
+            error_data = {
+                'date': datetime.now().strftime('%Y-%m-%d'),
+                'time': datetime.now().strftime('%H:%M:%S'),
+                'link_url': self.link_url
+            }
+            error_msg = MessageTemplate.format_error_message(error_data)
+            self.send_message(error_msg, title="数据获取失败")
 
     def test_push(self):
         """测试推送功能"""
-        logger.info("测试钉钉推送功能...")
-        test_message = f"""# 🧪 钉钉推送测试消息
-
-
-**⏰ 测试时间:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-**🔧 功能:** 黄金价格推送服务
-
-**✅ 状态:** 连接正常
-
-
-如果您收到此消息，说明钉钉推送功能配置成功！
-
-
-🔗 [管理界面]({self.link_url})"""
-
-        result = self.send_dingtalk_message(test_message)
+        logger.info("测试推送功能...")
+        result = self.push_manager.test_service()
         if result:
-            logger.info("✅ 钉钉推送测试成功")
+            logger.info("✅ 推送测试成功")
             global service_status
             service_status['last_push'] = datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
             service_status['push_count'] += 1
         else:
-            logger.error("❌ 钉钉推送测试失败")
+            logger.error("❌ 推送测试失败")
         return result
 
 # 初始化服务

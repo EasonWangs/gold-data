@@ -1,0 +1,31 @@
+{
+  "push_services": {
+    "dingtalk": {
+      "enabled": true,
+      "name": "钉钉推送",
+      "config_file": "dingtalk_config.json"
+    }
+  },
+  "push_rules": {
+    "opening_price": {
+      "enabled": true,
+      "time": "09:00",
+      "weekdays_only": true,
+      "services": ["dingtalk"],
+      "template": "opening_price"
+    },
+    "closing_price": {
+      "enabled": true,
+      "time": "16:00",
+      "weekdays_only": true,
+      "services": ["dingtalk"],
+      "template": "closing_price"
+    }
+  },
+  "custom_templates": {},
+  "notification_settings": {
+    "retry_on_failure": true,
+    "max_retries": 3,
+    "retry_delay": 60
+  }
+}
