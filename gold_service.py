@@ -119,20 +119,73 @@ class GoldService:
             return
 
         logger.info("开始推送开盘价格...")
-        data = self.get_gold_price_data()
 
-        if data and data['history'] is not None:
-            hist_data = data['history']
-            prev_data = data['prev_history']
-            prev_close = prev_data.get('close', 'N/A') if prev_data is not None else 'N/A'
+        # 获取实时数据,查找9:00的价格作为开盘价
+        spot_data = self.get_real_time_gold_price()
+
+        if spot_data is not None and not spot_data.empty:
+            # 查找9:00:00的记录作为开盘价
+            from datetime import time as dt_time
+            nine_am = dt_time(9, 0, 0)
+
+            # 筛选9点的数据
+            nine_oclock_data = spot_data[spot_data['时间'] == nine_am]
+
+            if not nine_oclock_data.empty:
+                # 使用9点的现价作为开盘价
+                open_price = nine_oclock_data.iloc[0]['现价']
+                logger.info(f"找到9:00开盘价: {open_price}")
+            else:
+                # 如果没有9点的数据,使用当前最新价格
+                open_price = spot_data.iloc[-1]['现价']
+                logger.warning(f"未找到9:00数据,使用当前价格: {open_price}")
+
+            # 获取前一日收盘价
+            hist_data_full = self.get_historical_gold_price()
+            prev_close = 'N/A'
+
+            if hist_data_full is not None and not hist_data_full.empty:
+                # 获取最后一条历史记录
+                last_hist = hist_data_full.iloc[-1]
+                last_date = last_hist.get('date')
+
+                # 检查是否是今天的数据
+                from datetime import datetime as dt
+                if isinstance(last_date, str):
+                    record_date = dt.strptime(last_date, '%Y-%m-%d').date()
+                else:
+                    record_date = last_date.date() if hasattr(last_date, 'date') else last_date
+
+                current_date = datetime.now().date()
+
+                # 如果最后一条是今天的,前一日收盘是倒数第二条
+                if record_date == current_date and len(hist_data_full) >= 2:
+                    prev_close = hist_data_full.iloc[-2]['close']
+                else:
+                    # 否则最后一条就是前一日收盘
+                    prev_close = last_hist['close']
+
+            # 计算涨跌额和涨跌幅
+            if isinstance(prev_close, (int, float)) and prev_close != 0:
+                change = open_price - prev_close
+                change_percent = (change / prev_close) * 100
+            else:
+                change = 0
+                change_percent = 0
+
+            # 涨跌表情
+            trend_emoji = "📈" if change > 0 else "📉" if change < 0 else "➡️"
 
             # 准备消息数据
             message_data = {
                 'date': datetime.now().strftime('%Y-%m-%d'),
                 'time': datetime.now().strftime('%H:%M:%S'),
                 'symbol': 'Au99.99 (上海黄金交易所)',
-                'open_price': hist_data.get('open', 'N/A'),
-                'prev_close': prev_close,
+                'open_price': open_price,
+                'prev_close': prev_close if isinstance(prev_close, (int, float)) else 'N/A',
+                'change': change,
+                'change_percent': change_percent,
+                'trend_emoji': trend_emoji,
                 'link_url': self.link_url
             }
 
@@ -158,15 +211,69 @@ class GoldService:
             return
 
         logger.info("开始推送收盘价格...")
-        data = self.get_gold_price_data()
 
-        if data and data['history'] is not None:
-            hist_data = data['history']
-            prev_data = data['prev_history']
+        # 获取历史数据并检查日期
+        hist_data_full = self.get_historical_gold_price()
+
+        if hist_data_full is not None and not hist_data_full.empty:
+            # 检查最后一条记录的日期
+            last_record = hist_data_full.iloc[-1]
+            last_date = last_record.get('date')
+
+            # 转换日期进行比较
+            from datetime import datetime as dt
+            if isinstance(last_date, str):
+                record_date = dt.strptime(last_date, '%Y-%m-%d').date()
+            else:
+                record_date = last_date.date() if hasattr(last_date, 'date') else last_date
+
+            current_date = datetime.now().date()
+
+            # 判断最后一条是否是今天的数据
+            if record_date == current_date:
+                # 最后一条是今天的数据
+                hist_data = last_record
+                # 前一日数据是倒数第二条
+                if len(hist_data_full) >= 2:
+                    prev_data = hist_data_full.iloc[-2]
+                    prev_close = prev_data.get('close', 0)
+                else:
+                    prev_close = 0
+                logger.info(f"使用今天的收盘数据: {record_date}")
+            else:
+                # 最后一条不是今天,使用实时价格作为收盘价
+                logger.warning(f"历史数据最后一条是 {record_date},不是今天 {current_date}")
+                logger.info("使用实时价格作为收盘价")
+
+                # 获取实时价格
+                spot_data = self.get_real_time_gold_price()
+                if spot_data is None or spot_data.empty:
+                    error_data = {
+                        'date': datetime.now().strftime('%Y-%m-%d'),
+                        'time': datetime.now().strftime('%H:%M:%S'),
+                        'link_url': self.link_url
+                    }
+                    error_msg = MessageTemplate.format_error_message(error_data)
+                    self.send_message(error_msg, title="数据获取失败")
+                    return
+
+                # 使用当前价格作为收盘价
+                current_price = spot_data.iloc[-1]['现价']
+
+                # 构造hist_data (使用实时价格和昨天的历史数据)
+                hist_data = {
+                    'open': last_record.get('open', 'N/A'),  # 使用昨天的开盘作为参考
+                    'close': current_price,  # 当前价格作为收盘
+                    'low': 'N/A',  # 无法确定
+                    'high': 'N/A'  # 无法确定
+                }
+
+                # 前一日收盘价就是最后一条历史记录的收盘价
+                prev_close = last_record.get('close', 0)
 
             # 计算涨跌（相对于前一日收盘价）
-            close_price = hist_data.get('close', 0) if hist_data is not None else 0
-            prev_close = prev_data.get('close', 0) if prev_data is not None else 0
+            close_price = hist_data.get('close', 0)
+            prev_close = prev_close
 
             # 涨跌额 = 今日收盘价 - 前一日收盘价
             change = close_price - prev_close if prev_close != 0 and close_price != 0 else 0

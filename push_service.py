@@ -179,6 +179,8 @@ class MessageTemplate:
 
 **📊 前日收盘:** {prev_close} 元/克
 
+**{trend_emoji} 涨跌额:** {change:.2f} 元/克 ({change_percent:.2f}%)
+
 🔗 [查看详细数据]({link_url})"""
 
     # 收盘价消息模板
@@ -189,11 +191,13 @@ class MessageTemplate:
 
 **🏅 品种:** {symbol}
 
-**💰 开-收盘价:** {open_price} ~ {close_price} 元/克
+**💰 开盘价:** {open_price} 元/克
 
 **📊 最低-高价:** {low_price} ~ {high_price} 元/克
 
-**📈 前一日收盘:** {prev_close} 元/克
+**💰 收盘价:** {close_price} 元/克
+
+**📈 前日收盘:** {prev_close} 元/克
 
 **{trend_emoji} 涨跌额:** {change:.2f} 元/克 ({change_percent:.2f}%)
 
