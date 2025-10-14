@@ -231,8 +231,25 @@ class GoldService:
 
             # 判断最后一条是否是今天的数据
             if record_date == current_date:
-                # 最后一条是今天的数据
-                hist_data = last_record
+                # 最后一条是今天的数据,但需要获取实时数据来补充最高最低价
+                spot_data = self.get_real_time_gold_price()
+
+                if spot_data is not None and not spot_data.empty:
+                    # 从实时数据中获取今日的最高价和最低价
+                    high_price = spot_data['现价'].max()
+                    low_price = spot_data['现价'].min()
+
+                    # 使用历史数据的开盘和收盘,但用实时数据的最高最低价
+                    hist_data = {
+                        'open': last_record.get('open'),
+                        'close': last_record.get('close'),
+                        'high': high_price,
+                        'low': low_price
+                    }
+                else:
+                    # 如果无法获取实时数据,使用历史数据
+                    hist_data = last_record
+
                 # 前一日数据是倒数第二条
                 if len(hist_data_full) >= 2:
                     prev_data = hist_data_full.iloc[-2]
@@ -260,12 +277,19 @@ class GoldService:
                 # 使用当前价格作为收盘价
                 current_price = spot_data.iloc[-1]['现价']
 
-                # 构造hist_data (使用实时价格和昨天的历史数据)
+                # 从实时数据中获取今日的最高价和最低价
+                # 筛选出今天的数据
+                from datetime import time as dt_time
+                # 获取所有实时数据中的最高价和最低价
+                high_price = spot_data['现价'].max()
+                low_price = spot_data['现价'].min()
+
+                # 构造hist_data (使用实时价格和今日的最高最低价)
                 hist_data = {
                     'open': last_record.get('open', 'N/A'),  # 使用昨天的开盘作为参考
                     'close': current_price,  # 当前价格作为收盘
-                    'low': 'N/A',  # 无法确定
-                    'high': 'N/A'  # 无法确定
+                    'low': low_price,  # 今日最低价
+                    'high': high_price  # 今日最高价
                 }
 
                 # 前一日收盘价就是最后一条历史记录的收盘价
