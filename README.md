@@ -17,13 +17,18 @@ pip install -r requirements.txt
 
 ### 启动服务
 ```bash
+# Web/API 服务（默认仅监听本机）
 python gold_service.py
+
+# 定时推送必须作为单独的单实例进程运行
+python gold_service.py --scheduler-only
 ```
 
 ### 配置钉钉推送
 1. 编辑 `dingtalk_config.json` 文件
 2. 替换 webhook 中的 `YOUR_ACCESS_TOKEN`
-3. 重启服务生效
+3. 设置管理令牌（请使用随机且足够长的值）：`export GOLD_ADMIN_TOKEN='请替换为随机令牌'`
+4. 重启服务生效
 
 ## 🌟 核心功能
 
@@ -33,7 +38,7 @@ python gold_service.py
 - 🔌 **标准接口**: RESTful API 设计，JSON 格式响应
 
 ### 2️⃣ 钉钉推送服务
-- ⏰ **定时推送**: 工作日 09:02 开盘价 / 16:02 收盘价
+- ⏰ **定时推送**: 工作日 09:00 开盘价 / 16:00 收盘价
 - 📱 **手动推送**: 即时推送开盘价、收盘价
 - 🧪 **测试功能**: 一键测试钉钉推送连接
 - 🗓️ **智能排除**: 自动跳过周末
@@ -41,8 +46,8 @@ python gold_service.py
 ### 3️⃣ Web管理界面
 - 📋 **多标签设计**: 价格数据/钉钉推送/API文档
 - 🔄 **实时刷新**: 价格数据实时查看和刷新
-- 🎛️ **服务管理**: 一键启停推送服务
-- 📊 **状态监控**: 服务运行状态和推送统计
+- 🔐 **受保护操作**: 手动推送需提供管理令牌
+- 🧭 **独立调度**: 定时任务由单独的单实例进程运行
 
 ## 📋 API接口文档
 
@@ -60,24 +65,20 @@ curl http://localhost:5080/api/gold/info
 
 ### 推送服务API
 ```bash
-# 启动推送服务
-curl -X POST http://localhost:5080/api/service/start
-
-# 停止推送服务
-curl -X POST http://localhost:5080/api/service/stop
-
-# 获取服务状态
-curl http://localhost:5080/api/service/status
+# 先在服务端设置 GOLD_ADMIN_TOKEN；所有管理接口均需此请求头
+export GOLD_ADMIN_TOKEN='请替换为随机令牌'
 
 # 测试钉钉推送
-curl -X POST http://localhost:5080/api/push/test
+curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/push/test
 
 # 手动推送开盘价
-curl -X POST http://localhost:5080/api/push/opening
+curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/push/opening
 
 # 手动推送收盘价
-curl -X POST http://localhost:5080/api/push/closing
+curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/push/closing
 ```
+
+`/api/service/start` 与 `/api/service/stop` 已停用，避免 Gunicorn 多 Worker 重复启动调度器。请使用进程管理器启动或停止 `python gold_service.py --scheduler-only`。
 
 ## ⚙️ 钉钉推送配置
 
@@ -168,7 +169,8 @@ curl -X POST http://localhost:5080/api/push/closing
 |------|------|
 | 🌐 **网络要求** | 确保能访问钉钉API和上海黄金交易所 |
 | ⚙️ **配置检查** | 首次使用需配置钉钉webhook地址 |
-| ⏰ **时区设置** | 推送时间基于本地时区（09:02/16:02）|
+| 🔐 **管理令牌** | 必须设置 `GOLD_ADMIN_TOKEN` 才能手动或测试推送 |
+| ⏰ **时区设置** | 推送时间基于本地时区（09:00/16:00）|
 | 📅 **工作日历** | 自动排除周末，不包括节假日 |
 | 🔌 **端口设置** | 默认端口5080，如冲突可修改 |
 
@@ -184,18 +186,22 @@ curl -X POST http://localhost:5080/api/push/closing
 
 ### 开发环境
 ```bash
-python gold_service.py
+export GOLD_ADMIN_TOKEN='请替换为随机令牌'
+python gold_service.py                         # Web/API
+python gold_service.py --scheduler-only        # 定时推送（另一个终端）
 ```
 
 ### 生产环境
 ```bash
-# 方式1: 后台运行
-nohup python gold_service.py > gold_service.log 2>&1 &
-
-# 方式2: 使用 gunicorn
+# Web/API：可使用多个 Gunicorn Worker
 pip install gunicorn
-gunicorn -w 4 -b 0.0.0.0:5080 gold_service:app
+GOLD_ADMIN_TOKEN='请替换为随机令牌' gunicorn -w 4 -b 127.0.0.1:5080 gold_service:app
+
+# 定时推送：必须只启动一个实例；建议由 systemd、supervisor 或容器编排守护
+python gold_service.py --scheduler-only
 ```
+
+如需对外提供 Web/API，请在反向代理后通过 HTTPS 暴露，并限制管理页面和管理接口的访问来源。
 
 ## 🎉 项目总结
 
@@ -203,7 +209,7 @@ gunicorn -w 4 -b 0.0.0.0:5080 gold_service:app
 
 - 🎯 **功能完整**: 数据获取 + 推送通知 + Web管理
 - 🚀 **部署简单**: 单文件运行，配置简单
-- 💪 **性能稳定**: 多线程处理，错误恢复
+- 💪 **部署安全**: 管理接口令牌保护，调度进程单实例运行
 - 🎨 **界面友好**: 现代化Web界面，操作直观
 - 🔧 **易于扩展**: 模块化设计，便于二次开发
 

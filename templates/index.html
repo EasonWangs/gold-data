@@ -109,25 +109,31 @@
 
                 <!-- 钉钉推送标签页 -->
                 <div v-if="activeTab === 'push'">
-                    <div class="status" :class="serviceStatus.running ? 'status-running' : 'status-stopped'">
-                        <h3>📊 推送服务状态</h3>
-                        <p>{{ serviceStatus.running ? '✅ 推送服务运行中' : '⏹️ 推送服务已停止' }}</p>
+                    <div class="status status-running">
+                        <h3>📊 定时推送</h3>
+                        <p>✅ 由独立调度进程运行，避免多 Worker 重复推送。</p>
+                    </div>
+
+                    <div class="card">
+                        <h4>🔐 管理令牌</h4>
+                        <input
+                            v-model="adminToken"
+                            type="password"
+                            class="form-control"
+                            placeholder="输入 GOLD_ADMIN_TOKEN"
+                            autocomplete="off"
+                        >
+                        <p>令牌仅保存在当前浏览器内存中，用于手动和测试推送。</p>
                     </div>
 
                     <div style="text-align: center; margin: 30px 0;">
-                        <button class="btn btn-success" @click="startService" :disabled="loading.service">
-                            🚀 启动定时推送
-                        </button>
-                        <button class="btn btn-danger" @click="stopService" :disabled="loading.service">
-                            ⏹️ 停止推送
-                        </button>
-                        <button class="btn btn-warning" @click="testPush" :disabled="loading.push">
+                        <button class="btn btn-warning" @click="testPush" :disabled="loading.push || !adminToken">
                             🧪 测试推送
                         </button>
-                        <button class="btn" @click="pushOpening" :disabled="loading.push">
+                        <button class="btn" @click="pushOpening" :disabled="loading.push || !adminToken">
                             📈 手动推送开盘价
                         </button>
-                        <button class="btn" @click="pushClosing" :disabled="loading.push">
+                        <button class="btn" @click="pushClosing" :disabled="loading.push || !adminToken">
                             📉 手动推送收盘价
                         </button>
                     </div>
@@ -140,10 +146,9 @@
                             <p>• 自动跳过周末</p>
                         </div>
                         <div class="card">
-                            <h4>📊 推送统计</h4>
-                            <p>启动时间: {{ serviceStatus.start_time ? formatTimestamp(serviceStatus.start_time) : '-' }}</p>
-                            <p>推送次数: {{ serviceStatus.push_count || 0 }}</p>
-                            <p>最后推送: {{ serviceStatus.last_push ? formatTimestamp(serviceStatus.last_push) : '-' }}</p>
+                            <h4>🛠️ 运行方式</h4>
+                            <p><code>python gold_service.py --scheduler-only</code></p>
+                            <p>通过进程管理器启停调度器；Web 界面不再提供启停操作。</p>
                         </div>
                     </div>
 

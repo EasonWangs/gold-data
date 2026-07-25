@@ -13,7 +13,6 @@ createApp({
             loading: {
                 realtime: false,
                 history: false,
-                service: false,
                 push: false
             },
             realtimeData: null,
@@ -22,21 +21,21 @@ createApp({
             historyData: [],
             historyDays: 5,
             historyError: null,
-            serviceStatus: {
-                running: false,
-                start_time: null,
-                last_push: null,
-                push_count: 0
-            },
+            adminToken: '',
             pushMessage: null
         }
     },
     mounted() {
-        this.updateServiceStatus();
-        // 每10秒更新一次服务状态
-        setInterval(this.updateServiceStatus, 10000);
     },
     methods: {
+        adminRequestConfig() {
+            return {
+                headers: {
+                    'X-Admin-Token': this.adminToken
+                }
+            };
+        },
+
         async refreshRealTimePrice() {
             this.loading.realtime = true;
             this.realtimeError = null;
@@ -74,66 +73,6 @@ createApp({
             }
         },
 
-        async updateServiceStatus() {
-            try {
-                const response = await axios.get('/api/service/status');
-                if (response.data.status === 'success') {
-                    this.serviceStatus = {
-                        running: response.data.running,
-                        start_time: response.data.start_time,
-                        last_push: response.data.last_push,
-                        push_count: response.data.push_count
-                    };
-                }
-            } catch (error) {
-                console.error('获取服务状态失败:', error);
-            }
-        },
-
-        async startService() {
-            this.loading.service = true;
-            this.pushMessage = null;
-
-            try {
-                const response = await axios.post('/api/service/start');
-                this.pushMessage = {
-                    type: response.data.status === 'success' ? 'success' : 'error',
-                    text: response.data.message
-                };
-                await this.updateServiceStatus();
-            } catch (error) {
-                this.pushMessage = {
-                    type: 'error',
-                    text: '启动服务失败: ' + (error.response?.data?.message || error.message)
-                };
-            } finally {
-                this.loading.service = false;
-                setTimeout(() => this.pushMessage = null, 5000);
-            }
-        },
-
-        async stopService() {
-            this.loading.service = true;
-            this.pushMessage = null;
-
-            try {
-                const response = await axios.post('/api/service/stop');
-                this.pushMessage = {
-                    type: response.data.status === 'success' ? 'success' : 'error',
-                    text: response.data.message
-                };
-                await this.updateServiceStatus();
-            } catch (error) {
-                this.pushMessage = {
-                    type: 'error',
-                    text: '停止服务失败: ' + (error.response?.data?.message || error.message)
-                };
-            } finally {
-                this.loading.service = false;
-                setTimeout(() => this.pushMessage = null, 5000);
-            }
-        },
-
         async testPush() {
             await this.performPush('/api/push/test', '测试推送');
         },
@@ -151,12 +90,11 @@ createApp({
             this.pushMessage = null;
 
             try {
-                const response = await axios.post(endpoint);
+                const response = await axios.post(endpoint, {}, this.adminRequestConfig());
                 this.pushMessage = {
                     type: response.data.status === 'success' ? 'success' : 'error',
                     text: response.data.message
                 };
-                await this.updateServiceStatus();
             } catch (error) {
                 this.pushMessage = {
                     type: 'error',

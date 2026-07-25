@@ -10,8 +10,11 @@ import requests
 import json
 import schedule
 import time
-import threading
 import logging
+import argparse
+import hmac
+import os
+from functools import wraps
 from flask import Flask, jsonify, request
 from datetime import datetime
 from push_service import push_manager, MessageTemplate
@@ -27,7 +30,6 @@ app.jinja_env.variable_start_string = '[['
 app.jinja_env.variable_end_string = ']]'
 
 # 全局变量
-scheduler_thread = None
 scheduler_running = False
 service_status = {
     'running': False,
@@ -36,6 +38,39 @@ service_status = {
     'push_count': 0,
     'errors': []
 }
+
+ADMIN_TOKEN_ENV = 'GOLD_ADMIN_TOKEN'
+SCHEDULER_CONTROL_MESSAGE = (
+    '定时推送仅能由独立调度进程管理；请使用 '
+    '`python gold_service.py --scheduler-only` 启动。'
+)
+
+
+def require_admin_token(view):
+    """Protect management and manual-push endpoints with an environment token."""
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        expected_token = os.environ.get(ADMIN_TOKEN_ENV)
+        provided_token = request.headers.get('X-Admin-Token', '')
+
+        if not expected_token:
+            logger.error('%s is not configured; rejecting management request', ADMIN_TOKEN_ENV)
+            return jsonify({
+                'status': 'error',
+                'message': f'服务器未配置 {ADMIN_TOKEN_ENV}',
+                'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
+            }), 503
+
+        if not hmac.compare_digest(provided_token, expected_token):
+            return jsonify({
+                'status': 'error',
+                'message': '管理令牌无效',
+                'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
+            }), 401
+
+        return view(*args, **kwargs)
+
+    return wrapped
 
 class GoldService:
     def __init__(self):
@@ -112,11 +147,16 @@ class GoldService:
         today = datetime.now().weekday()  # 0=Monday, 6=Sunday
         return today < 5  # Monday(0) to Friday(4)
 
+    def _record_successful_push(self):
+        """Record only confirmed deliveries in the local scheduler status."""
+        service_status['last_push'] = datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
+        service_status['push_count'] += 1
+
     def push_opening_price(self):
         """推送开盘价格"""
         if not self.is_trading_day():
             logger.info("今日为周末，跳过开盘价格推送")
-            return
+            return False, '今日非交易日，未发送开盘价格'
 
         logger.info("开始推送开盘价格...")
 
@@ -136,9 +176,10 @@ class GoldService:
                 open_price = nine_oclock_data.iloc[0]['现价']
                 logger.info(f"找到9:00开盘价: {open_price}")
             else:
-                # 如果没有9点的数据,使用当前最新价格
-                open_price = spot_data.iloc[-1]['现价']
-                logger.warning(f"未找到9:00数据,使用当前价格: {open_price}")
+                # spot_quotations_sge 的跨零点过滤可能只留下夜盘残片。不能将
+                # 最后一条（例如 02:29）静默伪装成 09:00 的开盘价。
+                logger.error('未获取到 09:00 开盘价，拒绝发送开盘推送')
+                return False, '未获取到 09:00 开盘价，未发送开盘价格'
 
             # 获取前一日收盘价
             hist_data_full = self.get_historical_gold_price()
@@ -190,11 +231,13 @@ class GoldService:
             }
 
             message = MessageTemplate.format_opening_price_message(message_data)
-            self.send_message(message, title="黄金开盘价格播报")
+            sent = self.send_message(message, title="黄金开盘价格播报")
+            if sent:
+                self._record_successful_push()
+                return True, '开盘价格推送成功'
 
-            global service_status
-            service_status['last_push'] = datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
-            service_status['push_count'] += 1
+            logger.error('开盘价格推送未被钉钉接受')
+            return False, '钉钉未接受开盘价格推送'
         else:
             error_data = {
                 'date': datetime.now().strftime('%Y-%m-%d'),
@@ -203,12 +246,13 @@ class GoldService:
             }
             error_msg = MessageTemplate.format_error_message(error_data)
             self.send_message(error_msg, title="数据获取失败")
+            return False, '无法获取开盘价格数据'
 
     def push_closing_price(self):
         """推送收盘价格"""
         if not self.is_trading_day():
             logger.info("今日为周末，跳过收盘价格推送")
-            return
+            return False, '今日非交易日，未发送收盘价格'
 
         logger.info("开始推送收盘价格...")
 
@@ -231,24 +275,9 @@ class GoldService:
 
             # 判断最后一条是否是今天的数据
             if record_date == current_date:
-                # 最后一条是今天的数据,但需要获取实时数据来补充最高最低价
-                spot_data = self.get_real_time_gold_price()
-
-                if spot_data is not None and not spot_data.empty:
-                    # 从实时数据中获取今日的最高价和最低价
-                    high_price = spot_data['现价'].max()
-                    low_price = spot_data['现价'].min()
-
-                    # 使用历史数据的开盘和收盘,但用实时数据的最高最低价
-                    hist_data = {
-                        'open': last_record.get('open'),
-                        'close': last_record.get('close'),
-                        'high': high_price,
-                        'low': low_price
-                    }
-                else:
-                    # 如果无法获取实时数据,使用历史数据
-                    hist_data = last_record
+                # 官方日线已提供完整交易日（含夜盘）的 OHLC，不能用跨零点的
+                # spot_quotations_sge 实时残片重新计算高低价。
+                hist_data = last_record
 
                 # 前一日数据是倒数第二条
                 if len(hist_data_full) >= 2:
@@ -258,42 +287,17 @@ class GoldService:
                     prev_close = 0
                 logger.info(f"使用今天的收盘数据: {record_date}")
             else:
-                # 最后一条不是今天,使用实时价格作为收盘价
+                # 官方日线尚未更新时，实时行情会遗漏跨夜交易时段，不能据此拼接
+                # 当日 OHLC 或高低价；宁可拒绝发送，也不能发布错误的收盘区间。
                 logger.warning(f"历史数据最后一条是 {record_date},不是今天 {current_date}")
-                logger.info("使用实时价格作为收盘价")
-
-                # 获取实时价格
-                spot_data = self.get_real_time_gold_price()
-                if spot_data is None or spot_data.empty:
-                    error_data = {
-                        'date': datetime.now().strftime('%Y-%m-%d'),
-                        'time': datetime.now().strftime('%H:%M:%S'),
-                        'link_url': self.link_url
-                    }
-                    error_msg = MessageTemplate.format_error_message(error_data)
-                    self.send_message(error_msg, title="数据获取失败")
-                    return
-
-                # 使用当前价格作为收盘价
-                current_price = spot_data.iloc[-1]['现价']
-
-                # 从实时数据中获取今日的最高价和最低价
-                # 筛选出今天的数据
-                from datetime import time as dt_time
-                # 获取所有实时数据中的最高价和最低价
-                high_price = spot_data['现价'].max()
-                low_price = spot_data['现价'].min()
-
-                # 构造hist_data (使用实时价格和今日的最高最低价)
-                hist_data = {
-                    'open': last_record.get('open', 'N/A'),  # 使用昨天的开盘作为参考
-                    'close': current_price,  # 当前价格作为收盘
-                    'low': low_price,  # 今日最低价
-                    'high': high_price  # 今日最高价
+                error_data = {
+                    'date': datetime.now().strftime('%Y-%m-%d'),
+                    'time': datetime.now().strftime('%H:%M:%S'),
+                    'link_url': self.link_url
                 }
-
-                # 前一日收盘价就是最后一条历史记录的收盘价
-                prev_close = last_record.get('close', 0)
+                error_msg = MessageTemplate.format_error_message(error_data)
+                self.send_message(error_msg, title="数据获取失败")
+                return False, '当日官方收盘数据尚未发布，未发送收盘价格'
 
             # 计算涨跌（相对于前一日收盘价）
             close_price = hist_data.get('close', 0)
@@ -324,11 +328,13 @@ class GoldService:
             }
 
             message = MessageTemplate.format_closing_price_message(message_data)
-            self.send_message(message, title="黄金收盘价格播报")
+            sent = self.send_message(message, title="黄金收盘价格播报")
+            if sent:
+                self._record_successful_push()
+                return True, '收盘价格推送成功'
 
-            global service_status
-            service_status['last_push'] = datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
-            service_status['push_count'] += 1
+            logger.error('收盘价格推送未被钉钉接受')
+            return False, '钉钉未接受收盘价格推送'
         else:
             error_data = {
                 'date': datetime.now().strftime('%Y-%m-%d'),
@@ -337,6 +343,7 @@ class GoldService:
             }
             error_msg = MessageTemplate.format_error_message(error_data)
             self.send_message(error_msg, title="数据获取失败")
+            return False, '无法获取收盘价格数据'
 
     def test_push(self):
         """测试推送功能"""
@@ -344,9 +351,7 @@ class GoldService:
         result = self.push_manager.test_service()
         if result:
             logger.info("✅ 推送测试成功")
-            global service_status
-            service_status['last_push'] = datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
-            service_status['push_count'] += 1
+            self._record_successful_push()
         else:
             logger.error("❌ 推送测试失败")
         return result
@@ -354,57 +359,62 @@ class GoldService:
 # 初始化服务
 gold_service = GoldService()
 
-def run_scheduler():
-    """运行定时任务调度器"""
+def run_scheduler_forever():
+    """Run the scheduler in this dedicated process only."""
     global scheduler_running
-    logger.info("📅 定时推送调度器已启动")
-
-    while scheduler_running:
-        try:
-            schedule.run_pending()
-            time.sleep(60)  # 每分钟检查一次
-        except Exception as e:
-            logger.error(f"调度器运行异常: {e}")
-            service_status['errors'].append({
-                'time': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000'),
-                'error': str(e)
-            })
-
-def start_scheduler():
-    """启动定时任务"""
-    global scheduler_thread, scheduler_running
-
     if scheduler_running:
-        return False
+        raise RuntimeError('调度器已在此进程中运行')
 
-    # 设置定时任务
-    schedule.every().day.at("09:00").do(gold_service.push_opening_price)
-    schedule.every().day.at("16:00").do(gold_service.push_closing_price)
-
+    schedule.clear('gold-price')
+    schedule.every().day.at("09:00").do(gold_service.push_opening_price).tag('gold-price')
+    schedule.every().day.at("16:00").do(gold_service.push_closing_price).tag('gold-price')
     scheduler_running = True
-    scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
-    scheduler_thread.start()
-
     service_status['running'] = True
     service_status['start_time'] = datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
+    logger.info("📅 定时推送调度器已启动")
 
-    logger.info("定时任务设置完成:")
-    logger.info("- 每日09:00推送开盘价格（仅工作日）")
-    logger.info("- 每日16:00推送收盘价格（仅工作日）")
-    logger.info("- 周末将自动跳过推送")
+    try:
+        while scheduler_running:
+            try:
+                schedule.run_pending()
+            except Exception as e:
+                logger.exception(f"调度器运行异常: {e}")
+                service_status['errors'].append({
+                    'time': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000'),
+                    'error': str(e)
+                })
+                # Keep error history bounded and prevent a failed due job from busy-looping.
+                del service_status['errors'][:-100]
+            time.sleep(60)  # 每分钟检查一次
+    finally:
+        scheduler_running = False
+        service_status['running'] = False
+        schedule.clear('gold-price')
 
-    return True
 
-def stop_scheduler():
-    """停止定时任务"""
-    global scheduler_running
+def scheduler_control_response():
+    """Reject in-process scheduler control from WSGI workers."""
+    return jsonify({
+        'status': 'error',
+        'message': SCHEDULER_CONTROL_MESSAGE,
+        'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
+    }), 410
 
-    scheduler_running = False
-    schedule.clear()
 
-    service_status['running'] = False
+def push_response(success, message):
+    """Return a truthful HTTP response for a manual push attempt."""
+    if success:
+        status_code = 200
+    elif message.startswith('今日非交易日'):
+        status_code = 409
+    else:
+        status_code = 502
 
-    return True
+    return jsonify({
+        'status': 'success' if success else 'error',
+        'message': message,
+        'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
+    }), status_code
 
 
 @app.route('/')
@@ -507,80 +517,31 @@ def api_gold_info():
 
 # 推送服务 API
 @app.route('/api/service/status', methods=['GET'])
+@require_admin_token
 def api_service_status():
     """获取服务状态"""
     return jsonify({
         'status': 'success',
-        'running': service_status['running'],
-        'start_time': service_status['start_time'],
-        'last_push': service_status['last_push'],
-        'push_count': service_status['push_count'],
-        'errors': service_status['errors'][-5:],  # 最近5个错误
+        'scheduler_mode': 'external-process',
+        'scheduler_status': '由进程管理器和调度进程日志提供',
+        'message': '定时推送由独立调度进程管理，Web Worker 不提供其运行状态',
         'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
     })
 
 @app.route('/api/service/start', methods=['POST'])
+@require_admin_token
 def api_start_service():
-    """启动推送服务"""
-    try:
-        if service_status['running']:
-            return jsonify({
-                'status': 'warning',
-                'message': '推送服务已在运行中',
-                'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
-            })
-
-        success = start_scheduler()
-        if success:
-            logger.info("🚀 定时推送服务已启动")
-            return jsonify({
-                'status': 'success',
-                'message': '定时推送服务启动成功',
-                'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
-            })
-        else:
-            return jsonify({
-                'status': 'error',
-                'message': '推送服务启动失败',
-                'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
-            }), 500
-
-    except Exception as e:
-        logger.error(f"启动服务失败: {e}")
-        return jsonify({
-            'status': 'error',
-            'message': f'启动失败: {str(e)}',
-            'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
-        }), 500
+    """In-process scheduler control is unsafe with multi-worker WSGI."""
+    return scheduler_control_response()
 
 @app.route('/api/service/stop', methods=['POST'])
+@require_admin_token
 def api_stop_service():
-    """停止推送服务"""
-    try:
-        success = stop_scheduler()
-        if success:
-            logger.info("⏹️ 定时推送服务已停止")
-            return jsonify({
-                'status': 'success',
-                'message': '定时推送服务已停止',
-                'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
-            })
-        else:
-            return jsonify({
-                'status': 'error',
-                'message': '推送服务停止失败',
-                'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
-            }), 500
-
-    except Exception as e:
-        logger.error(f"停止服务失败: {e}")
-        return jsonify({
-            'status': 'error',
-            'message': f'停止失败: {str(e)}',
-            'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
-        }), 500
+    """In-process scheduler control is unsafe with multi-worker WSGI."""
+    return scheduler_control_response()
 
 @app.route('/api/push/test', methods=['POST'])
+@require_admin_token
 def api_test_push():
     """测试推送"""
     try:
@@ -608,16 +569,12 @@ def api_test_push():
         }), 500
 
 @app.route('/api/push/opening', methods=['POST'])
+@require_admin_token
 def api_push_opening():
     """推送开盘价"""
     try:
-        gold_service.push_opening_price()
-
-        return jsonify({
-            'status': 'success',
-            'message': '开盘价格推送成功',
-            'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
-        })
+        success, message = gold_service.push_opening_price()
+        return push_response(success, message)
 
     except Exception as e:
         logger.error(f"开盘价推送失败: {e}")
@@ -628,16 +585,12 @@ def api_push_opening():
         }), 500
 
 @app.route('/api/push/closing', methods=['POST'])
+@require_admin_token
 def api_push_closing():
     """推送收盘价"""
     try:
-        gold_service.push_closing_price()
-
-        return jsonify({
-            'status': 'success',
-            'message': '收盘价格推送成功',
-            'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
-        })
+        success, message = gold_service.push_closing_price()
+        return push_response(success, message)
 
     except Exception as e:
         logger.error(f"收盘价推送失败: {e}")
@@ -692,18 +645,29 @@ def create_dingtalk_config():
         return False
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='黄金价格服务')
+    parser.add_argument(
+        '--scheduler-only',
+        action='store_true',
+        help='仅运行单实例定时推送调度器，不启动 Web 服务'
+    )
+    args = parser.parse_args()
+
     # 检查配置文件
-    import os
     if not os.path.exists('dingtalk_config.json'):
         print("📝 首次运行，创建钉钉配置文件...")
         create_dingtalk_config()
         print("⚠️  请编辑 dingtalk_config.json 配置钉钉webhook地址")
 
-    print("🏅 启动黄金价格服务...")
-    print("🌐 服务地址: http://127.0.0.1:5080")
-    print("📋 管理界面: http://127.0.0.1:5080")
-    print("📖 API文档: http://127.0.0.1:5080/api/info")
-    print("🔔 钉钉推送: 工作日 09:00 和 16:00")
-    print("-" * 50)
+    if args.scheduler_only:
+        print("🔔 启动独立定时推送调度器...")
+        run_scheduler_forever()
+    else:
+        print("🏅 启动黄金价格服务...")
+        print("🌐 服务地址: http://127.0.0.1:5080")
+        print("📋 管理界面: http://127.0.0.1:5080")
+        print("📖 API文档: http://127.0.0.1:5080/api/info")
+        print("🔔 定时推送请单独运行: python gold_service.py --scheduler-only")
+        print("-" * 50)
 
-    app.run(debug=True, host='0.0.0.0', port=5080)
+        app.run(debug=False, host='127.0.0.1', port=5080)

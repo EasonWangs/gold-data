@@ -79,7 +79,12 @@ class DingTalkPushService(PushServiceBase):
             }
 
         try:
-            response = requests.post(self.webhook_url, headers=headers, data=json.dumps(data))
+            response = requests.post(
+                self.webhook_url,
+                headers=headers,
+                data=json.dumps(data),
+                timeout=10,
+            )
             if response.status_code == 200:
                 result = response.json()
                 if result.get('errcode') == 0:
