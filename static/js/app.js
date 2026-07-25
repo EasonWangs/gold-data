@@ -44,7 +44,7 @@ createApp({
                 const response = await axios.get('/api/gold/spot_quotations_sge');
                 this.realtimeResponse = response.data;
                 if (response.data.status === 'success' && response.data.data.length > 0) {
-                    this.realtimeData = response.data.data[0];
+                    this.realtimeData = response.data.data[response.data.data.length - 1];
                 } else {
                     this.realtimeError = '无法获取实时价格数据';
                 }

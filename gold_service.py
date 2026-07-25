@@ -17,6 +17,7 @@ import os
 from functools import wraps
 from flask import Flask, jsonify, request
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from push_service import push_manager, MessageTemplate
 
 # 配置日志
@@ -40,10 +41,26 @@ service_status = {
 }
 
 ADMIN_TOKEN_ENV = 'GOLD_ADMIN_TOKEN'
+MARKET_TIMEZONE = ZoneInfo('Asia/Shanghai')
+SCHEDULED_PUSH_TIMES = {
+    '09:00': ('opening', '开盘', lambda: gold_service.push_opening_price()),
+    '16:00': ('closing', '收盘', lambda: gold_service.push_closing_price()),
+}
 SCHEDULER_CONTROL_MESSAGE = (
     '定时推送仅能由独立调度进程管理；请使用 '
     '`python gold_service.py --scheduler-only` 启动。'
 )
+scheduled_pushes = set()
+
+
+def market_now():
+    """Return the current time in the Shanghai gold-market timezone."""
+    return datetime.now(MARKET_TIMEZONE)
+
+
+def market_timestamp():
+    """Return an unambiguous ISO-8601 timestamp with the UTC+08:00 offset."""
+    return market_now().isoformat(timespec='milliseconds')
 
 
 def require_admin_token(view):
@@ -58,14 +75,14 @@ def require_admin_token(view):
             return jsonify({
                 'status': 'error',
                 'message': f'服务器未配置 {ADMIN_TOKEN_ENV}',
-                'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
+                'timestamp': market_timestamp()
             }), 503
 
         if not hmac.compare_digest(provided_token, expected_token):
             return jsonify({
                 'status': 'error',
                 'message': '管理令牌无效',
-                'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
+                'timestamp': market_timestamp()
             }), 401
 
         return view(*args, **kwargs)
@@ -144,12 +161,12 @@ class GoldService:
 
     def is_trading_day(self):
         """判断是否为交易日（排除周六周日）"""
-        today = datetime.now().weekday()  # 0=Monday, 6=Sunday
+        today = market_now().weekday()  # 0=Monday, 6=Sunday
         return today < 5  # Monday(0) to Friday(4)
 
     def _record_successful_push(self):
         """Record only confirmed deliveries in the local scheduler status."""
-        service_status['last_push'] = datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
+        service_status['last_push'] = market_timestamp()
         service_status['push_count'] += 1
 
     def push_opening_price(self):
@@ -197,7 +214,7 @@ class GoldService:
                 else:
                     record_date = last_date.date() if hasattr(last_date, 'date') else last_date
 
-                current_date = datetime.now().date()
+                current_date = market_now().date()
 
                 # 如果最后一条是今天的,前一日收盘是倒数第二条
                 if record_date == current_date and len(hist_data_full) >= 2:
@@ -219,8 +236,8 @@ class GoldService:
 
             # 准备消息数据
             message_data = {
-                'date': datetime.now().strftime('%Y-%m-%d'),
-                'time': datetime.now().strftime('%H:%M:%S'),
+                'date': market_now().strftime('%Y-%m-%d'),
+                'time': market_now().strftime('%H:%M:%S'),
                 'symbol': 'Au99.99 (上海黄金交易所)',
                 'open_price': open_price,
                 'prev_close': prev_close if isinstance(prev_close, (int, float)) else 'N/A',
@@ -240,8 +257,8 @@ class GoldService:
             return False, '钉钉未接受开盘价格推送'
         else:
             error_data = {
-                'date': datetime.now().strftime('%Y-%m-%d'),
-                'time': datetime.now().strftime('%H:%M:%S'),
+                'date': market_now().strftime('%Y-%m-%d'),
+                'time': market_now().strftime('%H:%M:%S'),
                 'link_url': self.link_url
             }
             error_msg = MessageTemplate.format_error_message(error_data)
@@ -271,7 +288,7 @@ class GoldService:
             else:
                 record_date = last_date.date() if hasattr(last_date, 'date') else last_date
 
-            current_date = datetime.now().date()
+            current_date = market_now().date()
 
             # 判断最后一条是否是今天的数据
             if record_date == current_date:
@@ -291,8 +308,8 @@ class GoldService:
                 # 当日 OHLC 或高低价；宁可拒绝发送，也不能发布错误的收盘区间。
                 logger.warning(f"历史数据最后一条是 {record_date},不是今天 {current_date}")
                 error_data = {
-                    'date': datetime.now().strftime('%Y-%m-%d'),
-                    'time': datetime.now().strftime('%H:%M:%S'),
+                    'date': market_now().strftime('%Y-%m-%d'),
+                    'time': market_now().strftime('%H:%M:%S'),
                     'link_url': self.link_url
                 }
                 error_msg = MessageTemplate.format_error_message(error_data)
@@ -313,8 +330,8 @@ class GoldService:
 
             # 准备消息数据
             message_data = {
-                'date': datetime.now().strftime('%Y-%m-%d'),
-                'time': datetime.now().strftime('%H:%M:%S'),
+                'date': market_now().strftime('%Y-%m-%d'),
+                'time': market_now().strftime('%H:%M:%S'),
                 'symbol': 'Au99.99 (上海黄金交易所)',
                 'open_price': hist_data.get('open', 'N/A'),
                 'close_price': hist_data.get('close', 'N/A'),
@@ -337,8 +354,8 @@ class GoldService:
             return False, '钉钉未接受收盘价格推送'
         else:
             error_data = {
-                'date': datetime.now().strftime('%Y-%m-%d'),
-                'time': datetime.now().strftime('%H:%M:%S'),
+                'date': market_now().strftime('%Y-%m-%d'),
+                'time': market_now().strftime('%H:%M:%S'),
                 'link_url': self.link_url
             }
             error_msg = MessageTemplate.format_error_message(error_data)
@@ -359,6 +376,33 @@ class GoldService:
 # 初始化服务
 gold_service = GoldService()
 
+
+def run_due_pushes():
+    """Run each Shanghai-market scheduled push at most once per trading day."""
+    now = market_now()
+    if now.weekday() >= 5:
+        return
+
+    today_prefix = f'{now.date().isoformat()}:'
+    scheduled_pushes.intersection_update(
+        key for key in scheduled_pushes if key.startswith(today_prefix)
+    )
+
+    scheduled_push = SCHEDULED_PUSH_TIMES.get(now.strftime('%H:%M'))
+    if not scheduled_push:
+        return
+
+    push_name, push_label, push_job = scheduled_push
+    push_key = f'{now.date().isoformat()}:{push_name}'
+    if push_key in scheduled_pushes:
+        return
+
+    # Record before invocation so a transient exception cannot create duplicate broadcasts.
+    scheduled_pushes.add(push_key)
+    logger.info('触发上海时区 %s 定时推送', push_label)
+    push_job()
+
+
 def run_scheduler_forever():
     """Run the scheduler in this dedicated process only."""
     global scheduler_running
@@ -366,26 +410,28 @@ def run_scheduler_forever():
         raise RuntimeError('调度器已在此进程中运行')
 
     schedule.clear('gold-price')
-    schedule.every().day.at("09:00").do(gold_service.push_opening_price).tag('gold-price')
-    schedule.every().day.at("16:00").do(gold_service.push_closing_price).tag('gold-price')
+    # Only use an elapsed interval here. The due-time check itself is based on
+    # Asia/Shanghai, so a UTC host or container cannot shift the push time.
+    schedule.every(10).seconds.do(run_due_pushes).tag('gold-price')
     scheduler_running = True
     service_status['running'] = True
-    service_status['start_time'] = datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
-    logger.info("📅 定时推送调度器已启动")
+    service_status['start_time'] = market_timestamp()
+    logger.info("📅 定时推送调度器已启动（Asia/Shanghai）")
 
     try:
         while scheduler_running:
             try:
+                run_due_pushes()
                 schedule.run_pending()
             except Exception as e:
                 logger.exception(f"调度器运行异常: {e}")
                 service_status['errors'].append({
-                    'time': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000'),
+                    'time': market_timestamp(),
                     'error': str(e)
                 })
                 # Keep error history bounded and prevent a failed due job from busy-looping.
                 del service_status['errors'][:-100]
-            time.sleep(60)  # 每分钟检查一次
+            time.sleep(10)
     finally:
         scheduler_running = False
         service_status['running'] = False
@@ -397,7 +443,7 @@ def scheduler_control_response():
     return jsonify({
         'status': 'error',
         'message': SCHEDULER_CONTROL_MESSAGE,
-        'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
+        'timestamp': market_timestamp()
     }), 410
 
 
@@ -413,7 +459,7 @@ def push_response(success, message):
     return jsonify({
         'status': 'success' if success else 'error',
         'message': message,
-        'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
+        'timestamp': market_timestamp()
     }), status_code
 
 
@@ -440,7 +486,7 @@ def api_realtime_gold_price():
 
             result = {
                 "status": "success",
-                "timestamp": datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000'),
+                "timestamp": market_timestamp(),
                 "data": data_dict,
                 "count": len(data)
             }
@@ -449,13 +495,13 @@ def api_realtime_gold_price():
             return jsonify({
                 "status": "error",
                 "message": "无法获取实时黄金价格数据",
-                "timestamp": datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
+                "timestamp": market_timestamp()
             }), 500
     except Exception as e:
         return jsonify({
             "status": "error",
             "message": str(e),
-            "timestamp": datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
+            "timestamp": market_timestamp()
         }), 500
 
 @app.route('/api/gold/spot_hist_sge', methods=['GET'])
@@ -480,7 +526,7 @@ def api_historical_gold_price():
 
             result = {
                 "status": "success",
-                "timestamp": datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000'),
+                "timestamp": market_timestamp(),
                 "data": data_dict,
                 "count": len(data),
                 "days": days or "all"
@@ -490,13 +536,13 @@ def api_historical_gold_price():
             return jsonify({
                 "status": "error",
                 "message": "无法获取历史黄金价格数据",
-                "timestamp": datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
+                "timestamp": market_timestamp()
             }), 500
     except Exception as e:
         return jsonify({
             "status": "error",
             "message": str(e),
-            "timestamp": datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
+            "timestamp": market_timestamp()
         }), 500
 
 @app.route('/api/gold/info', methods=['GET'])
@@ -525,7 +571,7 @@ def api_service_status():
         'scheduler_mode': 'external-process',
         'scheduler_status': '由进程管理器和调度进程日志提供',
         'message': '定时推送由独立调度进程管理，Web Worker 不提供其运行状态',
-        'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
+        'timestamp': market_timestamp()
     })
 
 @app.route('/api/service/start', methods=['POST'])
@@ -551,13 +597,13 @@ def api_test_push():
             return jsonify({
                 'status': 'success',
                 'message': '测试推送发送成功',
-                'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
+                'timestamp': market_timestamp()
             })
         else:
             return jsonify({
                 'status': 'error',
                 'message': '测试推送发送失败',
-                'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
+                'timestamp': market_timestamp()
             }), 500
 
     except Exception as e:
@@ -565,7 +611,7 @@ def api_test_push():
         return jsonify({
             'status': 'error',
             'message': f'测试推送失败: {str(e)}',
-            'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
+            'timestamp': market_timestamp()
         }), 500
 
 @app.route('/api/push/opening', methods=['POST'])
@@ -581,7 +627,7 @@ def api_push_opening():
         return jsonify({
             'status': 'error',
             'message': f'开盘价推送失败: {str(e)}',
-            'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
+            'timestamp': market_timestamp()
         }), 500
 
 @app.route('/api/push/closing', methods=['POST'])
@@ -597,7 +643,7 @@ def api_push_closing():
         return jsonify({
             'status': 'error',
             'message': f'收盘价推送失败: {str(e)}',
-            'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.000')
+            'timestamp': market_timestamp()
         }), 500
 
 @app.route('/api/info', methods=['GET'])
