@@ -10,14 +10,21 @@
 
 ### 安装依赖
 ```bash
-pip install akshare pandas requests flask schedule
-# 或使用
-pip install -r requirements.txt
+# 在项目目录创建独立虚拟环境，避免修改系统或 Homebrew 管理的 Python
+python3 -m venv .venv
+source .venv/bin/activate
+
+# 安装项目依赖
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
+
+每次运行服务前，先执行 `source .venv/bin/activate`。请勿使用 `--break-system-packages` 绕过系统 Python 的保护。
 
 ### 启动服务
 ```bash
 # Web/API 服务（默认仅监听本机）
+# 请先执行 source .venv/bin/activate
 python gold_service.py
 
 # 定时推送必须作为单独的单实例进程运行
