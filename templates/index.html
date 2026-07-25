@@ -16,7 +16,7 @@
             <!-- 头部 -->
             <div class="header">
                 <h1>🏅 黄金价格服务</h1>
-                <p>上海黄金交易所 Au99.99 数据服务 & 钉钉推送</p>
+                <p>上海黄金交易所 Au99.99 / Ag99.99 数据服务 & 钉钉推送</p>
             </div>
 
             <!-- 导航标签 -->
@@ -105,6 +105,76 @@
                     <div v-if="historyError" class="error">
                         {{ historyError }}
                     </div>
+
+                    <h3 style="margin-top: 40px;">🥈 实时白银价格</h3>
+                    <div class="input-group">
+                        <button class="btn" @click="refreshSilverRealTimePrice" :disabled="loading.silverRealtime">
+                            {{ loading.silverRealtime ? '刷新中...' : '🔄 刷新数据' }}
+                        </button>
+                    </div>
+
+                    <div v-if="loading.silverRealtime" class="loading">
+                        <p>正在获取实时白银数据...</p>
+                    </div>
+
+                    <div v-else-if="silverRealtimeData" class="card price-card">
+                        <h4>💰 最新白银价格</h4>
+                        <div class="price-value">{{ silverRealtimeData.现价 || 'N/A' }} 元/千克</div>
+                        <p><strong>品种:</strong> {{ silverRealtimeData.品种 || 'Ag99.99' }}</p>
+                        <p><strong>更新时间:</strong> {{ silverRealtimeData.更新时间 || 'N/A' }}</p>
+                        <p><strong>数据时间:</strong> {{ formatTimestamp(silverRealtimeResponse?.timestamp) }}</p>
+                    </div>
+
+                    <div v-if="silverRealtimeError" class="error">
+                        {{ silverRealtimeError }}
+                    </div>
+
+                    <h3 style="margin-top: 40px;">🥈 白银历史价格数据</h3>
+                    <div class="input-group">
+                        <input
+                            v-model.number="silverHistoryDays"
+                            type="number"
+                            class="form-control"
+                            placeholder="天数"
+                            min="1"
+                            max="365"
+                        >
+                        <button class="btn" @click="refreshSilverHistoryPrice" :disabled="loading.silverHistory">
+                            {{ loading.silverHistory ? '获取中...' : '🔄 获取历史数据' }}
+                        </button>
+                    </div>
+
+                    <div v-if="loading.silverHistory" class="loading">
+                        <p>正在获取历史白银数据...</p>
+                    </div>
+
+                    <div v-else-if="silverHistoryData && silverHistoryData.length > 0" class="card">
+                        <h4>📊 白银历史价格数据 (最近{{ silverHistoryDays }}天)</h4>
+                        <table class="table">
+                            <thead>
+                                <tr>
+                                    <th>日期</th>
+                                    <th>开盘价</th>
+                                    <th>收盘价</th>
+                                    <th>最高价</th>
+                                    <th>最低价</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="item in silverHistoryData.slice(-10)" :key="item.date">
+                                    <td>{{ formatDate(item.date) }}</td>
+                                    <td>{{ item.open || 'N/A' }}</td>
+                                    <td>{{ item.close || 'N/A' }}</td>
+                                    <td>{{ item.high || 'N/A' }}</td>
+                                    <td>{{ item.low || 'N/A' }}</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div v-if="silverHistoryError" class="error">
+                        {{ silverHistoryError }}
+                    </div>
                 </div>
 
                 <!-- 钉钉推送标签页 -->
@@ -162,7 +232,7 @@
                     <h3>🔌 API 接口文档</h3>
 
                     <div class="card">
-                        <h4>📊 黄金价格API</h4>
+                        <h4>📊 黄金与白银价格API</h4>
                         <div class="api-code">
 # 获取实时价格
 curl http://localhost:5080/api/gold/spot_quotations_sge
@@ -172,6 +242,12 @@ curl http://localhost:5080/api/gold/spot_hist_sge?days=5
 
 # 获取API信息
 curl http://localhost:5080/api/gold/info
+
+# 获取实时白银价格
+curl http://localhost:5080/api/silver/spot_quotations_sge
+
+# 获取白银历史价格 (最近5天)
+curl http://localhost:5080/api/silver/spot_hist_sge?days=5
                         </div>
                     </div>
 

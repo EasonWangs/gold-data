@@ -13,6 +13,8 @@ createApp({
             loading: {
                 realtime: false,
                 history: false,
+                silverRealtime: false,
+                silverHistory: false,
                 push: false
             },
             realtimeData: null,
@@ -21,6 +23,12 @@ createApp({
             historyData: [],
             historyDays: 5,
             historyError: null,
+            silverRealtimeData: null,
+            silverRealtimeResponse: null,
+            silverRealtimeError: null,
+            silverHistoryData: [],
+            silverHistoryDays: 5,
+            silverHistoryError: null,
             adminToken: '',
             pushMessage: null
         }
@@ -70,6 +78,43 @@ createApp({
                 this.historyError = '网络请求失败: ' + (error.response?.data?.message || error.message);
             } finally {
                 this.loading.history = false;
+            }
+        },
+
+        async refreshSilverRealTimePrice() {
+            this.loading.silverRealtime = true;
+            this.silverRealtimeError = null;
+
+            try {
+                const response = await axios.get('/api/silver/spot_quotations_sge');
+                this.silverRealtimeResponse = response.data;
+                if (response.data.status === 'success' && response.data.data.length > 0) {
+                    this.silverRealtimeData = response.data.data[response.data.data.length - 1];
+                } else {
+                    this.silverRealtimeError = '无法获取实时白银价格数据';
+                }
+            } catch (error) {
+                this.silverRealtimeError = '网络请求失败: ' + (error.response?.data?.message || error.message);
+            } finally {
+                this.loading.silverRealtime = false;
+            }
+        },
+
+        async refreshSilverHistoryPrice() {
+            this.loading.silverHistory = true;
+            this.silverHistoryError = null;
+
+            try {
+                const response = await axios.get(`/api/silver/spot_hist_sge?days=${this.silverHistoryDays}`);
+                if (response.data.status === 'success') {
+                    this.silverHistoryData = response.data.data;
+                } else {
+                    this.silverHistoryError = '无法获取历史白银价格数据';
+                }
+            } catch (error) {
+                this.silverHistoryError = '网络请求失败: ' + (error.response?.data?.message || error.message);
+            } finally {
+                this.loading.silverHistory = false;
             }
         },
 

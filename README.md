@@ -1,6 +1,6 @@
-# 🏅 黄金价格服务
+# 🏅 黄金与白银价格服务
 
-**一站式黄金价格API和钉钉推送服务**
+**一站式黄金、白银价格 API 和黄金钉钉推送服务**
 
 集成数据获取、推送通知和Web管理的完整解决方案。
 
@@ -39,9 +39,9 @@ python gold_service.py --scheduler-only
 
 ## 🌟 核心功能
 
-### 1️⃣ 黄金价格API
-- 📊 **实时价格**: 上海黄金交易所 Au99.99 实时行情
-- 📈 **历史数据**: 支持天数筛选的历史价格查询
+### 1️⃣ 贵金属价格API
+- 🏅 **黄金**: 上海黄金交易所 Au99.99 实时与历史行情（元/克）
+- 🥈 **白银**: 上海黄金交易所 Ag99.99 实时与历史行情（元/千克）
 - 🧊 **源站保护**: 实时与历史行情均采用 60 秒进程内缓存
 - 🔌 **标准接口**: RESTful API 设计，JSON 格式响应
 
@@ -59,7 +59,7 @@ python gold_service.py --scheduler-only
 
 ## 📋 API接口文档
 
-### 黄金价格API
+### 黄金与白银价格API
 ```bash
 # 获取实时价格
 curl http://localhost:5080/api/gold/spot_quotations_sge
@@ -69,6 +69,12 @@ curl http://localhost:5080/api/gold/spot_hist_sge?days=5
 
 # 获取API信息
 curl http://localhost:5080/api/gold/info
+
+# 获取实时白银价格
+curl http://localhost:5080/api/silver/spot_quotations_sge
+
+# 获取白银历史价格 (最近5天)
+curl http://localhost:5080/api/silver/spot_hist_sge?days=5
 ```
 
 ### 推送服务API
@@ -225,6 +231,6 @@ python gold_service.py --scheduler-only
 
 ---
 
-**🏅 数据来源**: 上海黄金交易所 Au99.99
+**🏅 数据来源**: 上海黄金交易所 Au99.99 / Ag99.99
 **🔧 技术栈**: Flask + akshare + 钉钉API
 **📅 版本**: 2.0.0 (2025-09-19)

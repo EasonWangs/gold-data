@@ -44,6 +44,8 @@ service_status = {
 ADMIN_TOKEN_ENV = 'GOLD_ADMIN_TOKEN'
 CACHE_TTL_SECONDS = 60
 MARKET_TIMEZONE = ZoneInfo('Asia/Shanghai')
+GOLD_SYMBOL = 'Au99.99'
+SILVER_SYMBOL = 'Ag99.99'
 SCHEDULED_PUSH_TIMES = {
     '09:00': ('opening', '开盘', lambda: gold_service.push_opening_price()),
     '16:00': ('closing', '收盘', lambda: gold_service.push_closing_price()),
@@ -130,23 +132,23 @@ class GoldService:
                 }
             return data
 
-    def get_real_time_gold_price(self):
-        """获取实时黄金价格（缓存 60 秒）"""
+    def get_real_time_sge_price(self, symbol):
+        """获取指定上海黄金交易所品种的实时行情（缓存 60 秒）"""
         try:
             return self._get_cached_data(
-                'spot_quotations_sge:Au99.99',
-                lambda: ak.spot_quotations_sge(symbol="Au99.99"),
+                f'spot_quotations_sge:{symbol}',
+                lambda: ak.spot_quotations_sge(symbol=symbol),
             )
         except Exception as e:
-            logger.error(f"获取实时黄金价格失败: {e}")
+            logger.error(f"获取 {symbol} 实时价格失败: {e}")
             return None
 
-    def get_historical_gold_price(self, days=30):
-        """获取历史黄金价格（全量源数据缓存 60 秒后再按 days 切片）"""
+    def get_historical_sge_price(self, symbol, days=30):
+        """获取指定品种历史数据（全量源数据缓存 60 秒后再按 days 切片）"""
         try:
             spot_hist_sge_df = self._get_cached_data(
-                'spot_hist_sge:Au99.99',
-                lambda: ak.spot_hist_sge(symbol='Au99.99'),
+                f'spot_hist_sge:{symbol}',
+                lambda: ak.spot_hist_sge(symbol=symbol),
             )
             if spot_hist_sge_df is None:
                 return None
@@ -154,8 +156,16 @@ class GoldService:
                 return spot_hist_sge_df.tail(days)
             return spot_hist_sge_df
         except Exception as e:
-            logger.error(f"获取历史黄金价格失败: {e}")
+            logger.error(f"获取 {symbol} 历史价格失败: {e}")
             return None
+
+    def get_real_time_gold_price(self):
+        """获取 Au99.99 实时价格。"""
+        return self.get_real_time_sge_price(GOLD_SYMBOL)
+
+    def get_historical_gold_price(self, days=30):
+        """获取 Au99.99 历史价格。"""
+        return self.get_historical_sge_price(GOLD_SYMBOL, days)
 
     def get_gold_price_data(self):
         """获取完整黄金价格数据"""
@@ -497,32 +507,43 @@ def index():
     from flask import render_template
     return render_template('index.html')
 
-# 黄金价格 API
-@app.route('/api/gold/spot_quotations_sge', methods=['GET'])
-def api_realtime_gold_price():
-    """实时黄金价格API接口"""
-    try:
-        data = gold_service.get_real_time_gold_price()
-        if data is not None and not data.empty:
-            # 转换为字典格式，处理时间字段
-            data_dict = data.to_dict('records')
-            # 处理时间字段序列化问题
-            for record in data_dict:
-                for key, value in record.items():
-                    if hasattr(value, 'strftime'):  # 检查是否为时间类型
-                        record[key] = value.strftime('%H:%M:%S') if hasattr(value, 'hour') else value.strftime('%Y-%m-%d')
+def serialize_sge_records(data, historical=False):
+    """Convert SGE data frames to JSON-safe records."""
+    data_dict = data.to_dict('records')
+    for record in data_dict:
+        for key, value in record.items():
+            if hasattr(value, 'strftime'):
+                if historical:
+                    record[key] = (
+                        value.strftime('%Y-%m-%dT%H:%M:%S.000')
+                        if hasattr(value, 'hour')
+                        else value.strftime('%Y-%m-%dT00:00:00.000')
+                    )
+                else:
+                    record[key] = (
+                        value.strftime('%H:%M:%S')
+                        if hasattr(value, 'hour')
+                        else value.strftime('%Y-%m-%d')
+                    )
+    return data_dict
 
+
+def realtime_sge_response(symbol, metal_name):
+    """Build a realtime SGE API response for a metal symbol."""
+    try:
+        data = gold_service.get_real_time_sge_price(symbol)
+        if data is not None and not data.empty:
             result = {
                 "status": "success",
                 "timestamp": market_timestamp(),
-                "data": data_dict,
+                "data": serialize_sge_records(data),
                 "count": len(data)
             }
             return jsonify(result)
         else:
             return jsonify({
                 "status": "error",
-                "message": "无法获取实时黄金价格数据",
+                "message": f"无法获取实时{metal_name}价格数据",
                 "timestamp": market_timestamp()
             }), 500
     except Exception as e:
@@ -532,30 +553,17 @@ def api_realtime_gold_price():
             "timestamp": market_timestamp()
         }), 500
 
-@app.route('/api/gold/spot_hist_sge', methods=['GET'])
-def api_historical_gold_price():
-    """历史黄金价格API接口"""
+
+def historical_sge_response(symbol, metal_name):
+    """Build a historical SGE API response for a metal symbol."""
     try:
-        # 获取查询参数
         days = request.args.get('days', type=int)
-
-        data = gold_service.get_historical_gold_price(days)
+        data = gold_service.get_historical_sge_price(symbol, days)
         if data is not None and not data.empty:
-            # 转换为字典格式，处理时间字段
-            data_dict = data.to_dict('records')
-            # 处理时间字段序列化问题，格式化为指定格式
-            for record in data_dict:
-                for key, value in record.items():
-                    if hasattr(value, 'strftime'):  # 检查是否为时间类型
-                        if hasattr(value, 'hour'):  # 如果包含时间部分
-                            record[key] = value.strftime('%Y-%m-%dT%H:%M:%S.000')
-                        else:  # 如果只是日期
-                            record[key] = value.strftime('%Y-%m-%dT00:00:00.000')
-
             result = {
                 "status": "success",
                 "timestamp": market_timestamp(),
-                "data": data_dict,
+                "data": serialize_sge_records(data, historical=True),
                 "count": len(data),
                 "days": days or "all"
             }
@@ -563,7 +571,7 @@ def api_historical_gold_price():
         else:
             return jsonify({
                 "status": "error",
-                "message": "无法获取历史黄金价格数据",
+                "message": f"无法获取历史{metal_name}价格数据",
                 "timestamp": market_timestamp()
             }), 500
     except Exception as e:
@@ -573,20 +581,50 @@ def api_historical_gold_price():
             "timestamp": market_timestamp()
         }), 500
 
+
+# 黄金与白银价格 API
+@app.route('/api/gold/spot_quotations_sge', methods=['GET'])
+def api_realtime_gold_price():
+    """实时黄金价格 API 接口。"""
+    return realtime_sge_response(GOLD_SYMBOL, '黄金')
+
+
+@app.route('/api/gold/spot_hist_sge', methods=['GET'])
+def api_historical_gold_price():
+    """历史黄金价格 API 接口。"""
+    return historical_sge_response(GOLD_SYMBOL, '黄金')
+
+
+@app.route('/api/silver/spot_quotations_sge', methods=['GET'])
+def api_realtime_silver_price():
+    """实时白银价格 API 接口。"""
+    return realtime_sge_response(SILVER_SYMBOL, '白银')
+
+
+@app.route('/api/silver/spot_hist_sge', methods=['GET'])
+def api_historical_silver_price():
+    """历史白银价格 API 接口。"""
+    return historical_sge_response(SILVER_SYMBOL, '白银')
+
 @app.route('/api/gold/info', methods=['GET'])
 def api_gold_info():
-    """黄金API信息接口"""
+    """贵金属 API 信息接口。"""
     return jsonify({
-        "name": "黄金价格API服务",
+        "name": "贵金属价格API服务",
         "version": "2.0.0",
-        "description": "提供上海黄金交易所Au99.99实时和历史价格数据",
+        "description": "提供上海黄金交易所 Au99.99 与 Ag99.99 的实时和历史价格数据",
         "endpoints": {
             "/api/gold/spot_quotations_sge": "获取实时黄金价格",
             "/api/gold/spot_hist_sge": "获取历史黄金价格",
+            "/api/silver/spot_quotations_sge": "获取实时白银价格",
+            "/api/silver/spot_hist_sge": "获取历史白银价格",
             "/api/gold/info": "API信息"
         },
         "data_source": "上海黄金交易所",
-        "symbol": "Au99.99"
+        "symbols": {
+            "gold": GOLD_SYMBOL,
+            "silver": SILVER_SYMBOL
+        }
     })
 
 # 推送服务 API
@@ -678,17 +716,19 @@ def api_push_closing():
 def api_info():
     """服务信息"""
     return jsonify({
-        'name': '黄金价格服务',
+        'name': '贵金属价格服务',
         'version': '2.0.0',
         'description': '集成黄金价格API和钉钉推送功能的统一服务',
         'features': {
-            'gold_api': '上海黄金交易所Au99.99价格数据',
+            'gold_api': '上海黄金交易所 Au99.99 价格数据',
+            'silver_api': '上海黄金交易所 Ag99.99 价格数据',
             'dingtalk_push': '定时推送到钉钉群',
             'web_interface': 'Web管理界面'
         },
         'endpoints': {
             '/': 'Web管理界面',
             '/api/gold/*': '黄金价格API',
+            '/api/silver/*': '白银价格API',
             '/api/service/*': '推送服务管理',
             '/api/push/*': '推送功能',
             '/api/info': '服务信息'
@@ -698,7 +738,10 @@ def api_info():
             'closing': '工作日 16:00'
         },
         'data_source': '上海黄金交易所',
-        'symbol': 'Au99.99'
+        'symbols': {
+            'gold': GOLD_SYMBOL,
+            'silver': SILVER_SYMBOL
+        }
     })
 
 def create_dingtalk_config():
