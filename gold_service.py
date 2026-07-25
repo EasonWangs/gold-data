@@ -10,6 +10,7 @@ import requests
 import json
 import schedule
 import time
+import threading
 import logging
 import argparse
 import hmac
@@ -41,6 +42,7 @@ service_status = {
 }
 
 ADMIN_TOKEN_ENV = 'GOLD_ADMIN_TOKEN'
+CACHE_TTL_SECONDS = 60
 MARKET_TIMEZONE = ZoneInfo('Asia/Shanghai')
 SCHEDULED_PUSH_TIMES = {
     '09:00': ('opening', '开盘', lambda: gold_service.push_opening_price()),
@@ -95,6 +97,8 @@ class GoldService:
         self.webhook_url = config.get('webhook_url') if config else None
         self.link_url = config.get('link_url', 'http://127.0.0.1:5080') if config else 'http://127.0.0.1:5080'
         self.push_manager = push_manager
+        self._data_cache = {}
+        self._cache_lock = threading.Lock()
 
     def load_dingtalk_config(self):
         """加载钉钉配置"""
@@ -109,19 +113,43 @@ class GoldService:
             logger.error(f"加载钉钉配置失败: {e}")
             return None
 
+    def _get_cached_data(self, cache_key, loader):
+        """Return fresh cached source data and serialize cache misses per process."""
+        now = time.monotonic()
+        with self._cache_lock:
+            cached = self._data_cache.get(cache_key)
+            if cached and now - cached['cached_at'] < CACHE_TTL_SECONDS:
+                logger.debug('使用 %s 缓存数据', cache_key)
+                return cached['data']
+
+            data = loader()
+            if data is not None:
+                self._data_cache[cache_key] = {
+                    'cached_at': time.monotonic(),
+                    'data': data,
+                }
+            return data
+
     def get_real_time_gold_price(self):
-        """获取实时黄金价格"""
+        """获取实时黄金价格（缓存 60 秒）"""
         try:
-            spot_quotations_sge_df = ak.spot_quotations_sge(symbol="Au99.99")
-            return spot_quotations_sge_df
+            return self._get_cached_data(
+                'spot_quotations_sge:Au99.99',
+                lambda: ak.spot_quotations_sge(symbol="Au99.99"),
+            )
         except Exception as e:
             logger.error(f"获取实时黄金价格失败: {e}")
             return None
 
     def get_historical_gold_price(self, days=30):
-        """获取历史黄金价格"""
+        """获取历史黄金价格（全量源数据缓存 60 秒后再按 days 切片）"""
         try:
-            spot_hist_sge_df = ak.spot_hist_sge(symbol='Au99.99')
+            spot_hist_sge_df = self._get_cached_data(
+                'spot_hist_sge:Au99.99',
+                lambda: ak.spot_hist_sge(symbol='Au99.99'),
+            )
+            if spot_hist_sge_df is None:
+                return None
             if days and days > 0:
                 return spot_hist_sge_df.tail(days)
             return spot_hist_sge_df
