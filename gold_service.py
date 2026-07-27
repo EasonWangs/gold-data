@@ -14,6 +14,7 @@ import threading
 import logging
 import argparse
 import hmac
+import math
 import os
 from functools import wraps
 from flask import Flask, jsonify, request
@@ -46,6 +47,11 @@ CACHE_TTL_SECONDS = 60
 MARKET_TIMEZONE = ZoneInfo('Asia/Shanghai')
 GOLD_SYMBOL = 'Au99.99'
 SILVER_SYMBOL = 'Ag99.99'
+GOLD_UNIT = '元/克'
+SILVER_UNIT = '元/千克'
+SUPPORTED_SMA_WINDOWS = (5, 10, 20, 30)
+DEFAULT_INDICATOR_DAYS = 60
+MAX_INDICATOR_DAYS = 365
 SCHEDULED_PUSH_TIMES = {
     '09:00': ('opening', '开盘', lambda: gold_service.push_opening_price()),
     '16:00': ('closing', '收盘', lambda: gold_service.push_closing_price()),
@@ -528,6 +534,148 @@ def serialize_sge_records(data, historical=False):
     return data_dict
 
 
+def clean_historical_close_data(data):
+    """Return ordered, de-duplicated SGE daily dates and numeric close prices.
+
+    Source data is intentionally cleaned before rolling calculations: trading
+    dates are sorted ascending, malformed dates/prices are ignored, and a
+    duplicate date keeps the last source record.
+    """
+    if data is None or data.empty:
+        return pd.DataFrame(columns=['date', 'close'])
+
+    if 'date' not in data.columns or 'close' not in data.columns:
+        raise ValueError('历史行情缺少 date 或 close 字段')
+
+    cleaned = data.loc[:, ['date', 'close']].copy()
+    cleaned['date'] = pd.to_datetime(cleaned['date'], errors='coerce').dt.normalize()
+    cleaned['close'] = pd.to_numeric(cleaned['close'], errors='coerce')
+    cleaned = cleaned.dropna(subset=['date', 'close'])
+    cleaned = cleaned[cleaned['close'].map(math.isfinite)]
+    cleaned = cleaned.sort_values('date', kind='stable')
+    cleaned = cleaned.drop_duplicates(subset=['date'], keep='last')
+    return cleaned.reset_index(drop=True)
+
+
+def calculate_sma_indicators(history_data, windows):
+    """Calculate SMA columns on the complete cleaned daily-close history."""
+    indicators = clean_historical_close_data(history_data)
+    for window in windows:
+        indicators[f'ma{window}'] = indicators['close'].rolling(
+            window=window,
+            min_periods=window,
+        ).mean()
+    return indicators
+
+
+def parse_sma_indicator_parameters():
+    """Parse and strictly validate SMA query parameters."""
+    days_values = request.args.getlist('days')
+    windows_values = request.args.getlist('windows')
+
+    if len(days_values) > 1:
+        raise ValueError('days 参数只能提供一次')
+    if len(windows_values) > 1:
+        raise ValueError('windows 参数只能提供一次')
+
+    if days_values:
+        try:
+            days = int(days_values[0])
+        except (TypeError, ValueError):
+            raise ValueError('days 必须为正整数')
+        if days <= 0 or days > MAX_INDICATOR_DAYS:
+            raise ValueError(f'days 必须在 1 到 {MAX_INDICATOR_DAYS} 之间')
+    else:
+        days = DEFAULT_INDICATOR_DAYS
+
+    if windows_values:
+        raw_windows = windows_values[0]
+        if not raw_windows:
+            raise ValueError('windows 不能为空')
+        try:
+            windows = [int(value.strip()) for value in raw_windows.split(',')]
+        except (TypeError, ValueError):
+            raise ValueError('windows 必须是以逗号分隔的整数')
+        if not windows or any(window not in SUPPORTED_SMA_WINDOWS for window in windows):
+            supported = ','.join(map(str, SUPPORTED_SMA_WINDOWS))
+            raise ValueError(f'windows 仅支持 {supported}')
+        if len(set(windows)) != len(windows):
+            raise ValueError('windows 不能包含重复窗口')
+    else:
+        windows = list(SUPPORTED_SMA_WINDOWS)
+
+    return days, windows
+
+
+def serialize_sma_records(data, windows):
+    """Convert a calculated SMA data frame into the public response shape."""
+    records = []
+    for _, row in data.iterrows():
+        date = row['date']
+        record = {
+            'date': date.strftime('%Y-%m-%d'),
+            'close': float(row['close']),
+        }
+        for window in windows:
+            value = row[f'ma{window}']
+            record[f'ma{window}'] = None if pd.isna(value) else float(value)
+        records.append(record)
+    return records
+
+
+def sma_indicator_response(symbol, metal_name, unit):
+    """Build a daily-close SMA indicator response from cached SGE history."""
+    try:
+        days, windows = parse_sma_indicator_parameters()
+    except ValueError as error:
+        return jsonify({
+            'status': 'error',
+            'message': str(error),
+            'timestamp': market_timestamp(),
+        }), 400
+
+    try:
+        # Request the full cached series first; calculating after a source slice
+        # would make the first response row's longer SMAs incomplete.
+        history_data = gold_service.get_historical_sge_price(symbol, days=None)
+        indicators = calculate_sma_indicators(history_data, windows)
+        if indicators.empty:
+            return jsonify({
+                'status': 'error',
+                'message': f'无法获取有效的历史{metal_name}收盘价数据',
+                'timestamp': market_timestamp(),
+            }), 500
+
+        response_data = serialize_sma_records(indicators.tail(days), windows)
+        latest = response_data[-1]
+        return jsonify({
+            'status': 'success',
+            'timestamp': market_timestamp(),
+            'symbol': symbol,
+            'unit': unit,
+            'basis': 'close',
+            'windows': windows,
+            'data': response_data,
+            'latest': latest,
+            'count': len(response_data),
+            'available_history_count': len(indicators),
+        })
+    except ValueError as error:
+        logger.error('计算 %s SMA 指标失败: %s', symbol, error)
+        return jsonify({
+            'status': 'error',
+            'message': str(error),
+            'timestamp': market_timestamp(),
+        }), 500
+    except Exception as error:
+        logger.exception('计算 %s SMA 指标失败', symbol)
+        return jsonify({
+            'status': 'error',
+            'message': str(error),
+            'timestamp': market_timestamp(),
+        }), 500
+
+
 def realtime_sge_response(symbol, metal_name):
     """Build a realtime SGE API response for a metal symbol."""
     try:
@@ -595,6 +743,12 @@ def api_historical_gold_price():
     return historical_sge_response(GOLD_SYMBOL, '黄金')
 
 
+@app.route('/api/gold/indicators/sma', methods=['GET'])
+def api_gold_sma_indicators():
+    """Au99.99 daily-close simple moving averages."""
+    return sma_indicator_response(GOLD_SYMBOL, '黄金', GOLD_UNIT)
+
+
 @app.route('/api/silver/spot_quotations_sge', methods=['GET'])
 def api_realtime_silver_price():
     """实时白银价格 API 接口。"""
@@ -616,6 +770,7 @@ def api_gold_info():
         "endpoints": {
             "/api/gold/spot_quotations_sge": "获取实时黄金价格",
             "/api/gold/spot_hist_sge": "获取历史黄金价格",
+            "/api/gold/indicators/sma": "获取黄金日线收盘价 SMA 指标",
             "/api/silver/spot_quotations_sge": "获取实时白银价格",
             "/api/silver/spot_hist_sge": "获取历史白银价格",
             "/api/gold/info": "API信息"
