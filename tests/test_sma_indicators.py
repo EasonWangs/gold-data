@@ -1,5 +1,6 @@
 import sys
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -31,6 +32,7 @@ def daily_ohlc(closes, start='2026-06-01'):
 class SmaIndicatorApiTests(unittest.TestCase):
     def setUp(self):
         self.client = gold_service.app.test_client()
+        gold_service.gold_service._data_cache.clear()
 
     def request_with_history(self, history, query=''):
         url = '/api/gold/indicators/sma'
@@ -189,6 +191,57 @@ class SmaIndicatorApiTests(unittest.TestCase):
             service.get_historical_sge_price(gold_service.GOLD_SYMBOL, days=None)
 
         self.assertEqual(source.call_count, 1)
+
+    def test_historical_cache_ttl_is_shorter_during_weekday_day_session(self):
+        trading_time = datetime(2026, 7, 27, 10, 0, tzinfo=gold_service.MARKET_TIMEZONE)
+        off_hours = datetime(2026, 7, 27, 18, 0, tzinfo=gold_service.MARKET_TIMEZONE)
+
+        self.assertEqual(
+            gold_service.historical_cache_ttl_seconds(trading_time),
+            30 * 60,
+        )
+        self.assertEqual(
+            gold_service.historical_cache_ttl_seconds(off_hours),
+            12 * 60 * 60,
+        )
+
+    def test_indicator_calculation_is_reused_within_history_ttl(self):
+        service = gold_service.GoldService()
+        history = daily_history([1, 2, 3])
+        with patch('gold_service.market_now') as now, patch(
+            'gold_service.calculate_sma_indicators',
+            return_value=history,
+        ) as calculator:
+            now.return_value = datetime(2026, 7, 27, 10, 0, tzinfo=gold_service.MARKET_TIMEZONE)
+            service.get_cached_indicators(
+                gold_service.GOLD_SYMBOL,
+                'sma:5',
+                lambda: gold_service.calculate_sma_indicators(history, [5]),
+            )
+            service.get_cached_indicators(
+                gold_service.GOLD_SYMBOL,
+                'sma:5',
+                lambda: gold_service.calculate_sma_indicators(history, [5]),
+            )
+
+        self.assertEqual(calculator.call_count, 1)
+
+    def test_history_refresh_invalidates_derived_indicators(self):
+        service = gold_service.GoldService()
+        indicator_key = f'indicators:{gold_service.GOLD_SYMBOL}:sma:5'
+        service._data_cache[indicator_key] = {
+            'cached_at': 0,
+            'ttl_seconds': 30 * 60,
+            'data': daily_history([1]),
+        }
+        with patch.object(
+            gold_service.ak,
+            'spot_hist_sge',
+            return_value=daily_history([1, 2]),
+        ):
+            service.get_historical_sge_price(gold_service.GOLD_SYMBOL, days=None)
+
+        self.assertNotIn(indicator_key, service._data_cache)
 
 
 if __name__ == '__main__':

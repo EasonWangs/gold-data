@@ -43,7 +43,9 @@ service_status = {
 }
 
 ADMIN_TOKEN_ENV = 'GOLD_ADMIN_TOKEN'
-CACHE_TTL_SECONDS = 60
+REALTIME_CACHE_TTL_SECONDS = 60
+HISTORICAL_TRADING_CACHE_TTL_SECONDS = 30 * 60
+HISTORICAL_OFF_HOURS_CACHE_TTL_SECONDS = 12 * 60 * 60
 MARKET_TIMEZONE = ZoneInfo('Asia/Shanghai')
 GOLD_SYMBOL = 'Au99.99'
 SILVER_SYMBOL = 'Ag99.99'
@@ -76,6 +78,24 @@ def market_now():
 def market_timestamp():
     """Return an unambiguous ISO-8601 timestamp with the UTC+08:00 offset."""
     return market_now().isoformat(timespec='milliseconds')
+
+
+def historical_cache_ttl_seconds(now=None):
+    """Return the historical-data TTL for the current Shanghai market period.
+
+    Daily historical bars can still change during the weekday day session, so
+    they are refreshed every 30 minutes between 09:00 and 16:30.  Outside that
+    window they are treated as settled and retained for 12 hours.
+    """
+    now = now or market_now()
+    minutes_since_midnight = now.hour * 60 + now.minute
+    is_weekday_day_session = (
+        now.weekday() < 5
+        and 9 * 60 <= minutes_since_midnight < 16 * 60 + 30
+    )
+    if is_weekday_day_session:
+        return HISTORICAL_TRADING_CACHE_TTL_SECONDS
+    return HISTORICAL_OFF_HOURS_CACHE_TTL_SECONDS
 
 
 def require_admin_token(view):
@@ -126,19 +146,26 @@ class GoldService:
             logger.error(f"加载钉钉配置失败: {e}")
             return None
 
-    def _get_cached_data(self, cache_key, loader):
-        """Return fresh cached source data and serialize cache misses per process."""
+    def _get_cached_data(self, cache_key, loader, ttl_seconds, on_refresh=None):
+        """Return fresh cached data and serialize cache misses per process."""
         now = time.monotonic()
         with self._cache_lock:
             cached = self._data_cache.get(cache_key)
-            if cached and now - cached['cached_at'] < CACHE_TTL_SECONDS:
+            if (
+                cached
+                and cached['ttl_seconds'] == ttl_seconds
+                and now - cached['cached_at'] < ttl_seconds
+            ):
                 logger.debug('使用 %s 缓存数据', cache_key)
                 return cached['data']
 
             data = loader()
             if data is not None:
+                if on_refresh:
+                    on_refresh()
                 self._data_cache[cache_key] = {
                     'cached_at': time.monotonic(),
+                    'ttl_seconds': ttl_seconds,
                     'data': data,
                 }
             return data
@@ -149,17 +176,20 @@ class GoldService:
             return self._get_cached_data(
                 f'spot_quotations_sge:{symbol}',
                 lambda: ak.spot_quotations_sge(symbol=symbol),
+                REALTIME_CACHE_TTL_SECONDS,
             )
         except Exception as e:
             logger.error(f"获取 {symbol} 实时价格失败: {e}")
             return None
 
     def get_historical_sge_price(self, symbol, days=30):
-        """获取指定品种历史数据（全量源数据缓存 60 秒后再按 days 切片）"""
+        """获取历史数据；交易时段缓存 30 分钟，其他时段缓存 12 小时。"""
         try:
             spot_hist_sge_df = self._get_cached_data(
                 f'spot_hist_sge:{symbol}',
                 lambda: ak.spot_hist_sge(symbol=symbol),
+                historical_cache_ttl_seconds(),
+                on_refresh=lambda: self._evict_cached_indicators(symbol),
             )
             if spot_hist_sge_df is None:
                 return None
@@ -169,6 +199,24 @@ class GoldService:
         except Exception as e:
             logger.error(f"获取 {symbol} 历史价格失败: {e}")
             return None
+
+    def get_cached_indicators(self, symbol, indicator_key, loader):
+        """Cache derived daily indicators for the same period as history data."""
+        return self._get_cached_data(
+            f'indicators:{symbol}:{indicator_key}',
+            loader,
+            historical_cache_ttl_seconds(),
+        )
+
+    def _evict_cached_indicators(self, symbol):
+        """Drop derived data when its cached history source is refreshed.
+
+        This runs while ``_cache_lock`` is already held by ``_get_cached_data``.
+        """
+        prefix = f'indicators:{symbol}:'
+        for cache_key in list(self._data_cache):
+            if cache_key.startswith(prefix):
+                del self._data_cache[cache_key]
 
     def get_real_time_gold_price(self):
         """获取 Au99.99 实时价格。"""
@@ -651,7 +699,12 @@ def sma_indicator_response(symbol, metal_name, unit):
         # Request the full cached series first; calculating after a source slice
         # would make the first response row's longer SMAs incomplete.
         history_data = gold_service.get_historical_sge_price(symbol, days=None)
-        indicators = calculate_sma_indicators(history_data, windows)
+        indicator_key = f"sma:{','.join(map(str, windows))}"
+        indicators = gold_service.get_cached_indicators(
+            symbol,
+            indicator_key,
+            lambda: calculate_sma_indicators(history_data, windows),
+        )
         if indicators.empty:
             return jsonify({
                 'status': 'error',
@@ -771,7 +824,11 @@ def kdj_indicator_response(symbol, metal_name, unit):
 
     try:
         history_data = gold_service.get_historical_sge_price(symbol, days=None)
-        indicators = calculate_kdj_indicators(history_data)
+        indicators = gold_service.get_cached_indicators(
+            symbol,
+            'kdj:9,3,3',
+            lambda: calculate_kdj_indicators(history_data),
+        )
         if indicators.empty:
             return jsonify({
                 'status': 'error',
@@ -858,7 +915,11 @@ def macd_indicator_response(symbol, metal_name, unit):
 
     try:
         history_data = gold_service.get_historical_sge_price(symbol, days=None)
-        indicators = calculate_macd_indicators(history_data)
+        indicators = gold_service.get_cached_indicators(
+            symbol,
+            'macd:12,26,9',
+            lambda: calculate_macd_indicators(history_data),
+        )
         if indicators.empty:
             return jsonify({
                 'status': 'error',
