@@ -29,6 +29,13 @@ def daily_ohlc(closes, start='2026-06-01'):
     })
 
 
+def realtime_quotes(prices):
+    return pd.DataFrame({
+        '时间': [f'09:{index:02d}:00' for index in range(len(prices))],
+        '现价': prices,
+    })
+
+
 class SmaIndicatorApiTests(unittest.TestCase):
     def setUp(self):
         self.client = gold_service.app.test_client()
@@ -242,6 +249,29 @@ class SmaIndicatorApiTests(unittest.TestCase):
             service.get_historical_sge_price(gold_service.GOLD_SYMBOL, days=None)
 
         self.assertNotIn(indicator_key, service._data_cache)
+
+    def test_drops_anomalous_terminal_realtime_quote_before_caching(self):
+        service = gold_service.GoldService()
+        raw_quotes = realtime_quotes([770.0, 771.2, 880.0])
+        with patch.object(
+            gold_service.ak,
+            'spot_quotations_sge',
+            return_value=raw_quotes,
+        ) as source:
+            quotes = service.get_real_time_sge_price(gold_service.GOLD_SYMBOL)
+            cached_quotes = service.get_real_time_sge_price(gold_service.GOLD_SYMBOL)
+
+        self.assertEqual(source.call_count, 1)
+        self.assertEqual(quotes['现价'].tolist(), [770.0, 771.2])
+        self.assertEqual(cached_quotes['现价'].tolist(), [770.0, 771.2])
+
+    def test_keeps_normal_terminal_realtime_quote(self):
+        quotes = gold_service.drop_terminal_realtime_outlier(
+            realtime_quotes([770.0, 771.2, 771.5]),
+            gold_service.GOLD_SYMBOL,
+        )
+
+        self.assertEqual(quotes['现价'].tolist(), [770.0, 771.2, 771.5])
 
 
 if __name__ == '__main__':

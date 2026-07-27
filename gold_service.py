@@ -44,6 +44,7 @@ service_status = {
 
 ADMIN_TOKEN_ENV = 'GOLD_ADMIN_TOKEN'
 REALTIME_CACHE_TTL_SECONDS = 60
+REALTIME_TERMINAL_OUTLIER_MAX_CHANGE_RATIO = 0.05
 HISTORICAL_TRADING_CACHE_TTL_SECONDS = 30 * 60
 HISTORICAL_OFF_HOURS_CACHE_TTL_SECONDS = 12 * 60 * 60
 MARKET_TIMEZONE = ZoneInfo('Asia/Shanghai')
@@ -96,6 +97,49 @@ def historical_cache_ttl_seconds(now=None):
     if is_weekday_day_session:
         return HISTORICAL_TRADING_CACHE_TTL_SECONDS
     return HISTORICAL_OFF_HOURS_CACHE_TTL_SECONDS
+
+
+def drop_terminal_realtime_outlier(data, symbol):
+    """Remove one implausible final tick from an upstream intraday series.
+
+    SGE's upstream time series can occasionally end with an isolated placeholder
+    quote.  The UI uses the last record as the latest price, so a terminal tick
+    that differs by more than 5% from the preceding valid tick must not be
+    exposed or cached.  The threshold is deliberately relative rather than a
+    hard-coded price so it applies to both gold and silver.
+    """
+    if data is None or data.empty or '现价' not in data.columns or len(data) < 2:
+        return data
+
+    prices = pd.to_numeric(data['现价'], errors='coerce')
+    valid_positions = [
+        position
+        for position, price in enumerate(prices)
+        if pd.notna(price) and math.isfinite(float(price)) and price > 0
+    ]
+    if len(valid_positions) < 2:
+        return data
+
+    previous_position, latest_position = valid_positions[-2:]
+    # Only change the terminal record.  A malformed earlier record is left
+    # untouched because it cannot affect which price is presented as latest.
+    if latest_position != len(data) - 1:
+        return data
+
+    previous_price = float(prices.iloc[previous_position])
+    latest_price = float(prices.iloc[latest_position])
+    change_ratio = abs(latest_price - previous_price) / previous_price
+    if change_ratio <= REALTIME_TERMINAL_OUTLIER_MAX_CHANGE_RATIO:
+        return data
+
+    logger.warning(
+        '丢弃 %s 实时行情末尾异常报价: %.2f（上一有效报价 %.2f，偏差 %.2f%%）',
+        symbol,
+        latest_price,
+        previous_price,
+        change_ratio * 100,
+    )
+    return data.iloc[:-1].reset_index(drop=True)
 
 
 def require_admin_token(view):
@@ -175,7 +219,10 @@ class GoldService:
         try:
             return self._get_cached_data(
                 f'spot_quotations_sge:{symbol}',
-                lambda: ak.spot_quotations_sge(symbol=symbol),
+                lambda: drop_terminal_realtime_outlier(
+                    ak.spot_quotations_sge(symbol=symbol),
+                    symbol,
+                ),
                 REALTIME_CACHE_TTL_SECONDS,
             )
         except Exception as e:
