@@ -48,6 +48,14 @@ class SmaIndicatorApiTests(unittest.TestCase):
             response = self.client.get(url)
         return response, loader
 
+    def request_macd_with_history(self, history, query=''):
+        url = '/api/gold/indicators/macd'
+        if query:
+            url = f'{url}?{query}'
+        with patch.object(gold_service.gold_service, 'get_historical_sge_price', return_value=history) as loader:
+            response = self.client.get(url)
+        return response, loader
+
     def test_calculates_all_requested_windows_from_complete_history(self):
         response, loader = self.request_with_history(
             daily_history(list(range(1, 41))),
@@ -141,6 +149,36 @@ class SmaIndicatorApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json()['status'], 'error')
+
+    def test_macd_uses_full_history_and_standard_12_26_9_ema(self):
+        response, loader = self.request_macd_with_history(
+            daily_history(list(range(1, 41))),
+            'days=1',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(loader.call_args.kwargs, {'days': None})
+        self.assertEqual(body['basis'], 'close')
+        self.assertEqual(body['parameters'], {
+            'fast_period': 12,
+            'slow_period': 26,
+            'signal_period': 9,
+        })
+        self.assertEqual(body['latest'], body['data'][0])
+        self.assertAlmostEqual(body['latest']['dif'], 6.3867273176)
+        self.assertAlmostEqual(body['latest']['dea'], 6.1145557406)
+
+    def test_macd_starts_at_zero_for_a_single_close_and_validates_days(self):
+        response, _ = self.request_macd_with_history(daily_history([100]), 'days=1')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['latest']['dif'], 0.0)
+        self.assertEqual(response.get_json()['latest']['dea'], 0.0)
+
+        invalid_response = self.client.get('/api/gold/indicators/macd?days=0')
+        self.assertEqual(invalid_response.status_code, 400)
+        self.assertEqual(invalid_response.get_json()['status'], 'error')
 
     def test_history_source_cache_is_reused_within_ttl(self):
         service = gold_service.GoldService()

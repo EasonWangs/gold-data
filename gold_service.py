@@ -54,6 +54,9 @@ DEFAULT_INDICATOR_DAYS = 60
 MAX_INDICATOR_DAYS = 365
 KDJ_RSV_WINDOW = 9
 KDJ_SMOOTHING_PERIOD = 3
+MACD_FAST_PERIOD = 12
+MACD_SLOW_PERIOD = 26
+MACD_SIGNAL_PERIOD = 9
 SCHEDULED_PUSH_TIMES = {
     '09:00': ('opening', '开盘', lambda: gold_service.push_opening_price()),
     '16:00': ('closing', '收盘', lambda: gold_service.push_closing_price()),
@@ -811,6 +814,91 @@ def kdj_indicator_response(symbol, metal_name, unit):
         }), 500
 
 
+def calculate_macd_indicators(history_data):
+    """Calculate daily MACD DIF and DEA from the complete close-price history.
+
+    EMA values use the first valid close as their initial value (pandas'
+    ``adjust=False`` convention), so DIF and DEA are available from the first
+    trading day and remain consistent when a later response is sliced.
+    """
+    indicators = clean_historical_close_data(history_data)
+    fast_ema = indicators['close'].ewm(span=MACD_FAST_PERIOD, adjust=False).mean()
+    slow_ema = indicators['close'].ewm(span=MACD_SLOW_PERIOD, adjust=False).mean()
+    indicators['dif'] = fast_ema - slow_ema
+    indicators['dea'] = indicators['dif'].ewm(
+        span=MACD_SIGNAL_PERIOD,
+        adjust=False,
+    ).mean()
+    return indicators
+
+
+def serialize_macd_records(data):
+    """Convert calculated MACD rows into JSON-safe public API records."""
+    records = []
+    for _, row in data.iterrows():
+        records.append({
+            'date': row['date'].strftime('%Y-%m-%d'),
+            'close': float(row['close']),
+            'dif': float(row['dif']),
+            'dea': float(row['dea']),
+        })
+    return records
+
+
+def macd_indicator_response(symbol, metal_name, unit):
+    """Build a daily-close MACD response from cached SGE history."""
+    try:
+        days = parse_indicator_days()
+    except ValueError as error:
+        return jsonify({
+            'status': 'error',
+            'message': str(error),
+            'timestamp': market_timestamp(),
+        }), 400
+
+    try:
+        history_data = gold_service.get_historical_sge_price(symbol, days=None)
+        indicators = calculate_macd_indicators(history_data)
+        if indicators.empty:
+            return jsonify({
+                'status': 'error',
+                'message': f'无法获取有效的历史{metal_name}收盘价数据',
+                'timestamp': market_timestamp(),
+            }), 500
+
+        response_data = serialize_macd_records(indicators.tail(days))
+        return jsonify({
+            'status': 'success',
+            'timestamp': market_timestamp(),
+            'symbol': symbol,
+            'unit': unit,
+            'basis': 'close',
+            'parameters': {
+                'fast_period': MACD_FAST_PERIOD,
+                'slow_period': MACD_SLOW_PERIOD,
+                'signal_period': MACD_SIGNAL_PERIOD,
+            },
+            'data': response_data,
+            'latest': response_data[-1],
+            'count': len(response_data),
+            'available_history_count': len(indicators),
+        })
+    except ValueError as error:
+        logger.error('计算 %s MACD 指标失败: %s', symbol, error)
+        return jsonify({
+            'status': 'error',
+            'message': str(error),
+            'timestamp': market_timestamp(),
+        }), 500
+    except Exception as error:
+        logger.exception('计算 %s MACD 指标失败', symbol)
+        return jsonify({
+            'status': 'error',
+            'message': str(error),
+            'timestamp': market_timestamp(),
+        }), 500
+
+
 def realtime_sge_response(symbol, metal_name):
     """Build a realtime SGE API response for a metal symbol."""
     try:
@@ -890,6 +978,12 @@ def api_gold_kdj_indicators():
     return kdj_indicator_response(GOLD_SYMBOL, '黄金', GOLD_UNIT)
 
 
+@app.route('/api/gold/indicators/macd', methods=['GET'])
+def api_gold_macd_indicators():
+    """Au99.99 daily-close MACD DIF and DEA indicators."""
+    return macd_indicator_response(GOLD_SYMBOL, '黄金', GOLD_UNIT)
+
+
 @app.route('/api/silver/spot_quotations_sge', methods=['GET'])
 def api_realtime_silver_price():
     """实时白银价格 API 接口。"""
@@ -913,6 +1007,7 @@ def api_gold_info():
             "/api/gold/spot_hist_sge": "获取历史黄金价格",
             "/api/gold/indicators/sma": "获取黄金日线收盘价 SMA 指标",
             "/api/gold/indicators/kdj": "获取黄金日线 KDJ 指标",
+            "/api/gold/indicators/macd": "获取黄金日线 MACD（DIF、DEA）指标",
             "/api/silver/spot_quotations_sge": "获取实时白银价格",
             "/api/silver/spot_hist_sge": "获取历史白银价格",
             "/api/gold/info": "API信息"

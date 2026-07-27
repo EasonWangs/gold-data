@@ -73,6 +73,9 @@ curl 'http://localhost:5080/api/gold/indicators/sma?days=60&windows=5,10,20,30'
 # 获取黄金日线 KDJ（默认最近 60 个交易日）
 curl 'http://localhost:5080/api/gold/indicators/kdj?days=60'
 
+# 获取黄金日线 MACD（默认最近 60 个交易日）
+curl 'http://localhost:5080/api/gold/indicators/macd?days=60'
+
 # 获取API信息
 curl http://localhost:5080/api/gold/info
 
@@ -131,7 +134,45 @@ curl http://localhost:5080/api/silver/spot_hist_sge?days=5
 }
 ```
 
-后续白银可沿用完全相同的响应模型扩展为 `/api/silver/indicators/sma`；EMA、MACD、布林带等也应继续归入 `indicators` 路径。
+后续白银可沿用完全相同的响应模型扩展为 `/api/silver/indicators/sma`；EMA、布林带等也应继续归入 `indicators` 路径。
+
+### 黄金日线 MACD API
+
+`GET /api/gold/indicators/macd` 基于 `Au99.99` 完整历史日线的 `close`（元/克）
+计算 MACD，并仅返回 `DIF` 与 `DEA`。计算使用常见的 `12,26,9` 参数：
+`DIF=EMA(12)-EMA(26)`，`DEA=EMA(9, DIF)`；EMA 以首个有效收盘价初始化。
+`days` 规则与 SMA 相同：默认 `60`，范围 `1`–`365`；始终先计算完整缓存历史，
+再截取最近记录。
+
+```json
+{
+  "status": "success",
+  "symbol": "Au99.99",
+  "unit": "元/克",
+  "basis": "close",
+  "parameters": {
+    "fast_period": 12,
+    "slow_period": 26,
+    "signal_period": 9
+  },
+  "data": [
+    {
+      "date": "2026-07-24",
+      "close": 812.34,
+      "dif": 4.21,
+      "dea": 3.86
+    }
+  ],
+  "latest": {
+    "date": "2026-07-24",
+    "close": 812.34,
+    "dif": 4.21,
+    "dea": 3.86
+  },
+  "count": 60,
+  "available_history_count": 120
+}
+```
 
 ### 黄金日线 KDJ API
 
