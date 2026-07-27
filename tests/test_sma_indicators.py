@@ -1,6 +1,6 @@
 import sys
 import unittest
-from datetime import datetime
+from datetime import datetime, time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -64,6 +64,14 @@ class SmaIndicatorApiTests(unittest.TestCase):
         with patch.object(gold_service.gold_service, 'get_historical_sge_price', return_value=history) as loader:
             response = self.client.get(url)
         return response, loader
+
+    def test_realtime_quote_time_includes_shanghai_date_and_offset(self):
+        quotes = pd.DataFrame({'时间': [time(14, 30, 5)], '现价': [892.25]})
+        market_time = datetime(2026, 7, 27, 14, 31, tzinfo=gold_service.MARKET_TIMEZONE)
+
+        records = gold_service.serialize_sge_records(quotes, market_time=market_time)
+
+        self.assertEqual(records[0]['时间'], '2026-07-27T14:30:05+08:00')
 
     def test_calculates_all_requested_windows_from_complete_history(self):
         response, loader = self.request_with_history(

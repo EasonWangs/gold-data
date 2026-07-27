@@ -18,7 +18,7 @@ import math
 import os
 from functools import wraps
 from flask import Flask, jsonify, request
-from datetime import datetime
+from datetime import datetime, time as clock_time
 from zoneinfo import ZoneInfo
 from push_service import push_manager, MessageTemplate
 
@@ -622,11 +622,32 @@ def index():
     from flask import render_template
     return render_template('index.html')
 
-def serialize_sge_records(data, historical=False):
-    """Convert SGE data frames to JSON-safe records."""
+def serialize_sge_records(data, historical=False, market_time=None):
+    """Convert SGE data frames to JSON-safe records.
+
+    Realtime SGE rows only carry a clock time at the source.  The public API
+    must retain the Shanghai date and UTC offset so consumers never have to
+    infer a trading day from their own clock.
+    """
+    market_time = market_time or market_now()
     data_dict = data.to_dict('records')
     for record in data_dict:
         for key, value in record.items():
+            if not historical and key == '时间':
+                if isinstance(value, str):
+                    try:
+                        value = clock_time.fromisoformat(value)
+                    except ValueError:
+                        # Keep unexpected source values visible instead of
+                        # silently replacing them with an invented timestamp.
+                        continue
+
+                if isinstance(value, clock_time):
+                    record[key] = datetime.combine(
+                        market_time.date(), value, tzinfo=MARKET_TIMEZONE
+                    ).isoformat(timespec='seconds')
+                    continue
+
             if hasattr(value, 'strftime'):
                 if historical:
                     record[key] = (
@@ -634,12 +655,16 @@ def serialize_sge_records(data, historical=False):
                         if hasattr(value, 'hour')
                         else value.strftime('%Y-%m-%dT00:00:00.000')
                     )
+                elif hasattr(value, 'hour'):
+                    # pandas Timestamp / datetime values already carry a
+                    # date.  Preserve it and make the market offset explicit.
+                    if getattr(value, 'tzinfo', None) is None:
+                        value = value.replace(tzinfo=MARKET_TIMEZONE)
+                    else:
+                        value = value.astimezone(MARKET_TIMEZONE)
+                    record[key] = value.isoformat(timespec='seconds')
                 else:
-                    record[key] = (
-                        value.strftime('%H:%M:%S')
-                        if hasattr(value, 'hour')
-                        else value.strftime('%Y-%m-%d')
-                    )
+                    record[key] = value.strftime('%Y-%m-%d')
     return data_dict
 
 
@@ -1021,10 +1046,11 @@ def realtime_sge_response(symbol, metal_name):
     try:
         data = gold_service.get_real_time_sge_price(symbol)
         if data is not None and not data.empty:
+            response_time = market_now()
             result = {
                 "status": "success",
-                "timestamp": market_timestamp(),
-                "data": serialize_sge_records(data),
+                "timestamp": response_time.isoformat(timespec='milliseconds'),
+                "data": serialize_sge_records(data, market_time=response_time),
                 "count": len(data)
             }
             return jsonify(result)
