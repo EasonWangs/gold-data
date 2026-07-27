@@ -52,6 +52,8 @@ SILVER_UNIT = '元/千克'
 SUPPORTED_SMA_WINDOWS = (5, 10, 20, 30)
 DEFAULT_INDICATOR_DAYS = 60
 MAX_INDICATOR_DAYS = 365
+KDJ_RSV_WINDOW = 9
+KDJ_SMOOTHING_PERIOD = 3
 SCHEDULED_PUSH_TIMES = {
     '09:00': ('opening', '开盘', lambda: gold_service.push_opening_price()),
     '16:00': ('closing', '收盘', lambda: gold_service.push_closing_price()),
@@ -568,15 +570,12 @@ def calculate_sma_indicators(history_data, windows):
     return indicators
 
 
-def parse_sma_indicator_parameters():
-    """Parse and strictly validate SMA query parameters."""
+def parse_indicator_days():
+    """Parse and strictly validate a common indicator days parameter."""
     days_values = request.args.getlist('days')
-    windows_values = request.args.getlist('windows')
 
     if len(days_values) > 1:
         raise ValueError('days 参数只能提供一次')
-    if len(windows_values) > 1:
-        raise ValueError('windows 参数只能提供一次')
 
     if days_values:
         try:
@@ -587,6 +586,17 @@ def parse_sma_indicator_parameters():
             raise ValueError(f'days 必须在 1 到 {MAX_INDICATOR_DAYS} 之间')
     else:
         days = DEFAULT_INDICATOR_DAYS
+
+    return days
+
+
+def parse_sma_indicator_parameters():
+    """Parse and strictly validate SMA query parameters."""
+    days = parse_indicator_days()
+    windows_values = request.args.getlist('windows')
+
+    if len(windows_values) > 1:
+        raise ValueError('windows 参数只能提供一次')
 
     if windows_values:
         raw_windows = windows_values[0]
@@ -676,6 +686,131 @@ def sma_indicator_response(symbol, metal_name, unit):
         }), 500
 
 
+def clean_historical_ohlc_data(data):
+    """Return ordered valid daily high-low-close data for range indicators."""
+    if data is None or data.empty:
+        return pd.DataFrame(columns=['date', 'high', 'low', 'close'])
+
+    required_columns = {'date', 'high', 'low', 'close'}
+    missing_columns = required_columns.difference(data.columns)
+    if missing_columns:
+        raise ValueError(f"历史行情缺少 {'、'.join(sorted(missing_columns))} 字段")
+
+    cleaned = data.loc[:, ['date', 'high', 'low', 'close']].copy()
+    cleaned['date'] = pd.to_datetime(cleaned['date'], errors='coerce').dt.normalize()
+    for column in ('high', 'low', 'close'):
+        cleaned[column] = pd.to_numeric(cleaned[column], errors='coerce')
+    cleaned = cleaned.dropna(subset=['date', 'high', 'low', 'close'])
+    cleaned = cleaned[
+        cleaned[['high', 'low', 'close']].map(math.isfinite).all(axis=1)
+        & (cleaned['high'] >= cleaned['low'])
+    ]
+    cleaned = cleaned.sort_values('date', kind='stable')
+    cleaned = cleaned.drop_duplicates(subset=['date'], keep='last')
+    return cleaned.reset_index(drop=True)
+
+
+def calculate_kdj_indicators(history_data):
+    """Calculate daily KDJ with 9-day RSV and K/D initial values of 50."""
+    indicators = clean_historical_ohlc_data(history_data)
+    low_n = indicators['low'].rolling(KDJ_RSV_WINDOW, min_periods=KDJ_RSV_WINDOW).min()
+    high_n = indicators['high'].rolling(KDJ_RSV_WINDOW, min_periods=KDJ_RSV_WINDOW).max()
+    price_range = high_n - low_n
+    rsv = ((indicators['close'] - low_n) / price_range * 100).where(price_range != 0, 50.0)
+
+    k_values = []
+    d_values = []
+    previous_k = 50.0
+    previous_d = 50.0
+    smoothing_weight = KDJ_SMOOTHING_PERIOD - 1
+    for value in rsv:
+        if pd.isna(value):
+            k_values.append(float('nan'))
+            d_values.append(float('nan'))
+            continue
+        current_k = (smoothing_weight * previous_k + value) / KDJ_SMOOTHING_PERIOD
+        current_d = (smoothing_weight * previous_d + current_k) / KDJ_SMOOTHING_PERIOD
+        k_values.append(current_k)
+        d_values.append(current_d)
+        previous_k = current_k
+        previous_d = current_d
+
+    indicators['k'] = k_values
+    indicators['d'] = d_values
+    indicators['j'] = 3 * indicators['k'] - 2 * indicators['d']
+    return indicators
+
+
+def serialize_kdj_records(data):
+    """Convert calculated KDJ rows into JSON-safe public API records."""
+    records = []
+    for _, row in data.iterrows():
+        record = {
+            'date': row['date'].strftime('%Y-%m-%d'),
+            'close': float(row['close']),
+        }
+        for field in ('k', 'd', 'j'):
+            record[field] = None if pd.isna(row[field]) else float(row[field])
+        records.append(record)
+    return records
+
+
+def kdj_indicator_response(symbol, metal_name, unit):
+    """Build a daily high-low-close KDJ response from cached SGE history."""
+    try:
+        days = parse_indicator_days()
+    except ValueError as error:
+        return jsonify({
+            'status': 'error',
+            'message': str(error),
+            'timestamp': market_timestamp(),
+        }), 400
+
+    try:
+        history_data = gold_service.get_historical_sge_price(symbol, days=None)
+        indicators = calculate_kdj_indicators(history_data)
+        if indicators.empty:
+            return jsonify({
+                'status': 'error',
+                'message': f'无法获取有效的历史{metal_name}高低收盘价数据',
+                'timestamp': market_timestamp(),
+            }), 500
+
+        response_data = serialize_kdj_records(indicators.tail(days))
+        return jsonify({
+            'status': 'success',
+            'timestamp': market_timestamp(),
+            'symbol': symbol,
+            'unit': unit,
+            'basis': 'high-low-close',
+            'parameters': {
+                'rsv_window': KDJ_RSV_WINDOW,
+                'k_smoothing_period': KDJ_SMOOTHING_PERIOD,
+                'd_smoothing_period': KDJ_SMOOTHING_PERIOD,
+                'initial_k': 50,
+                'initial_d': 50,
+            },
+            'data': response_data,
+            'latest': response_data[-1],
+            'count': len(response_data),
+            'available_history_count': len(indicators),
+        })
+    except ValueError as error:
+        logger.error('计算 %s KDJ 指标失败: %s', symbol, error)
+        return jsonify({
+            'status': 'error',
+            'message': str(error),
+            'timestamp': market_timestamp(),
+        }), 500
+    except Exception as error:
+        logger.exception('计算 %s KDJ 指标失败', symbol)
+        return jsonify({
+            'status': 'error',
+            'message': str(error),
+            'timestamp': market_timestamp(),
+        }), 500
+
+
 def realtime_sge_response(symbol, metal_name):
     """Build a realtime SGE API response for a metal symbol."""
     try:
@@ -749,6 +884,12 @@ def api_gold_sma_indicators():
     return sma_indicator_response(GOLD_SYMBOL, '黄金', GOLD_UNIT)
 
 
+@app.route('/api/gold/indicators/kdj', methods=['GET'])
+def api_gold_kdj_indicators():
+    """Au99.99 daily high-low-close KDJ indicators."""
+    return kdj_indicator_response(GOLD_SYMBOL, '黄金', GOLD_UNIT)
+
+
 @app.route('/api/silver/spot_quotations_sge', methods=['GET'])
 def api_realtime_silver_price():
     """实时白银价格 API 接口。"""
@@ -771,6 +912,7 @@ def api_gold_info():
             "/api/gold/spot_quotations_sge": "获取实时黄金价格",
             "/api/gold/spot_hist_sge": "获取历史黄金价格",
             "/api/gold/indicators/sma": "获取黄金日线收盘价 SMA 指标",
+            "/api/gold/indicators/kdj": "获取黄金日线 KDJ 指标",
             "/api/silver/spot_quotations_sge": "获取实时白银价格",
             "/api/silver/spot_hist_sge": "获取历史白银价格",
             "/api/gold/info": "API信息"

@@ -70,6 +70,9 @@ curl http://localhost:5080/api/gold/spot_hist_sge?days=5
 # 获取黄金日线 SMA（默认最近 60 个已计算交易日，MA5/10/20/30）
 curl 'http://localhost:5080/api/gold/indicators/sma?days=60&windows=5,10,20,30'
 
+# 获取黄金日线 KDJ（默认最近 60 个交易日）
+curl 'http://localhost:5080/api/gold/indicators/kdj?days=60'
+
 # 获取API信息
 curl http://localhost:5080/api/gold/info
 
@@ -129,6 +132,48 @@ curl http://localhost:5080/api/silver/spot_hist_sge?days=5
 ```
 
 后续白银可沿用完全相同的响应模型扩展为 `/api/silver/indicators/sma`；EMA、MACD、布林带等也应继续归入 `indicators` 路径。
+
+### 黄金日线 KDJ API
+
+`GET /api/gold/indicators/kdj` 基于 `Au99.99` 历史日线 `high`、`low`、`close`
+计算 KDJ。`days` 的规则与 SMA 相同：默认 `60`，范围 `1`–`365`；计算始终先使用完整缓存历史，再截取最近记录。
+
+计算口径为常见的 `9,3,3`：9 个交易日滚动 RSV，K 和 D 以 `50` 为初值，按
+`K=(2×前K+RSV)/3`、`D=(2×前D+K)/3` 递推，`J=3K-2D`。不足 9 个交易日时 `k`、`d`、`j` 为 `null`；高低价区间为零时 RSV 按中性值 `50` 处理。
+
+```json
+{
+  "status": "success",
+  "symbol": "Au99.99",
+  "unit": "元/克",
+  "basis": "high-low-close",
+  "parameters": {
+    "rsv_window": 9,
+    "k_smoothing_period": 3,
+    "d_smoothing_period": 3,
+    "initial_k": 50,
+    "initial_d": 50
+  },
+  "data": [
+    {
+      "date": "2026-07-24",
+      "close": 812.34,
+      "k": 68.12,
+      "d": 63.45,
+      "j": 77.46
+    }
+  ],
+  "latest": {
+    "date": "2026-07-24",
+    "close": 812.34,
+    "k": 68.12,
+    "d": 63.45,
+    "j": 77.46
+  },
+  "count": 60,
+  "available_history_count": 120
+}
+```
 
 ### 推送服务API
 ```bash

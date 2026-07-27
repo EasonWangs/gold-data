@@ -19,12 +19,29 @@ def daily_history(closes, start='2026-06-01'):
     })
 
 
+def daily_ohlc(closes, start='2026-06-01'):
+    return pd.DataFrame({
+        'date': pd.bdate_range(start=start, periods=len(closes)),
+        'high': [100] * len(closes),
+        'low': [0] * len(closes),
+        'close': closes,
+    })
+
+
 class SmaIndicatorApiTests(unittest.TestCase):
     def setUp(self):
         self.client = gold_service.app.test_client()
 
     def request_with_history(self, history, query=''):
         url = '/api/gold/indicators/sma'
+        if query:
+            url = f'{url}?{query}'
+        with patch.object(gold_service.gold_service, 'get_historical_sge_price', return_value=history) as loader:
+            response = self.client.get(url)
+        return response, loader
+
+    def request_kdj_with_history(self, history, query=''):
+        url = '/api/gold/indicators/kdj'
         if query:
             url = f'{url}?{query}'
         with patch.object(gold_service.gold_service, 'get_historical_sge_price', return_value=history) as loader:
@@ -92,6 +109,38 @@ class SmaIndicatorApiTests(unittest.TestCase):
                 response = self.client.get(f'/api/gold/indicators/sma?{query}')
                 self.assertEqual(response.status_code, 400)
                 self.assertEqual(response.get_json()['status'], 'error')
+
+    def test_kdj_uses_full_history_and_standard_9_3_3_smoothing(self):
+        response, loader = self.request_kdj_with_history(
+            daily_ohlc([50] * 9 + [100]),
+            'days=1',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(loader.call_args.kwargs, {'days': None})
+        self.assertEqual(body['basis'], 'high-low-close')
+        self.assertEqual(body['parameters']['rsv_window'], 9)
+        self.assertEqual(body['latest'], body['data'][0])
+        self.assertAlmostEqual(body['latest']['k'], 66.6666666667)
+        self.assertAlmostEqual(body['latest']['d'], 55.5555555556)
+        self.assertAlmostEqual(body['latest']['j'], 88.8888888889)
+
+    def test_kdj_returns_null_until_nine_trading_days_are_available(self):
+        response, _ = self.request_kdj_with_history(daily_ohlc([50] * 8), 'days=8')
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body['available_history_count'], 8)
+        self.assertTrue(all(record['k'] is None for record in body['data']))
+        self.assertTrue(all(record['d'] is None for record in body['data']))
+        self.assertTrue(all(record['j'] is None for record in body['data']))
+
+    def test_kdj_rejects_invalid_days(self):
+        response = self.client.get('/api/gold/indicators/kdj?days=0')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['status'], 'error')
 
     def test_history_source_cache_is_reused_within_ttl(self):
         service = gold_service.GoldService()
