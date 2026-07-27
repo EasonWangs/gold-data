@@ -44,7 +44,8 @@ service_status = {
 
 ADMIN_TOKEN_ENV = 'GOLD_ADMIN_TOKEN'
 REALTIME_CACHE_TTL_SECONDS = 60
-REALTIME_TERMINAL_OUTLIER_MAX_CHANGE_RATIO = 0.05
+# 末尾报价相对前一有效报价的最大允许偏差（1.36%）。
+REALTIME_TERMINAL_OUTLIER_MAX_CHANGE_RATIO = 0.0136
 HISTORICAL_TRADING_CACHE_TTL_SECONDS = 30 * 60
 HISTORICAL_OFF_HOURS_CACHE_TTL_SECONDS = 12 * 60 * 60
 MARKET_TIMEZONE = ZoneInfo('Asia/Shanghai')
@@ -104,7 +105,7 @@ def drop_terminal_realtime_outlier(data, symbol):
 
     SGE's upstream time series can occasionally end with an isolated placeholder
     quote.  The UI uses the last record as the latest price, so a terminal tick
-    that differs by more than 5% from the preceding valid tick must not be
+    that differs by 1.36% or more from the preceding valid tick must not be
     exposed or cached.  The threshold is deliberately relative rather than a
     hard-coded price so it applies to both gold and silver.
     """
@@ -129,7 +130,15 @@ def drop_terminal_realtime_outlier(data, symbol):
     previous_price = float(prices.iloc[previous_position])
     latest_price = float(prices.iloc[latest_position])
     change_ratio = abs(latest_price - previous_price) / previous_price
-    if change_ratio <= REALTIME_TERMINAL_OUTLIER_MAX_CHANGE_RATIO:
+    at_outlier_threshold = (
+        change_ratio > REALTIME_TERMINAL_OUTLIER_MAX_CHANGE_RATIO
+        or math.isclose(
+            change_ratio,
+            REALTIME_TERMINAL_OUTLIER_MAX_CHANGE_RATIO,
+            rel_tol=1e-12,
+        )
+    )
+    if not at_outlier_threshold:
         return data
 
     logger.warning(

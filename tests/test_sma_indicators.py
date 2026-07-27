@@ -265,6 +265,14 @@ class SmaIndicatorApiTests(unittest.TestCase):
         self.assertEqual(quotes['现价'].tolist(), [770.0, 771.2])
         self.assertEqual(cached_quotes['现价'].tolist(), [770.0, 771.2])
 
+    def test_drops_terminal_quote_at_the_1_36_percent_threshold(self):
+        quotes = gold_service.drop_terminal_realtime_outlier(
+            realtime_quotes([100.0, 98.64]),
+            gold_service.GOLD_SYMBOL,
+        )
+
+        self.assertEqual(quotes['现价'].tolist(), [100.0])
+
     def test_keeps_normal_terminal_realtime_quote(self):
         quotes = gold_service.drop_terminal_realtime_outlier(
             realtime_quotes([770.0, 771.2, 771.5]),
