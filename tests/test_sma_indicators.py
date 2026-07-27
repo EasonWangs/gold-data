@@ -73,6 +73,132 @@ class SmaIndicatorApiTests(unittest.TestCase):
 
         self.assertEqual(records[0]['时间'], '2026-07-27T14:30:05+08:00')
 
+    def test_realtime_quotes_from_a_stale_weekend_feed_keep_their_trading_day(self):
+        quotes = pd.DataFrame({'时间': [time(9), time(11), time(1)], '现价': [890, 891, 892]})
+        saturday_morning = datetime(2026, 7, 25, 10, 0, tzinfo=gold_service.MARKET_TIMEZONE)
+
+        records = gold_service.serialize_sge_records(quotes, market_time=saturday_morning)
+
+        self.assertEqual(records[0]['时间'], '2026-07-24T09:00:00+08:00')
+        self.assertEqual(records[1]['时间'], '2026-07-24T11:00:00+08:00')
+        self.assertEqual(records[2]['时间'], '2026-07-25T01:00:00+08:00')
+
+    def test_current_tick_can_be_a_few_minutes_ahead_of_the_server_clock(self):
+        quotes = pd.DataFrame({'时间': [time(9, 0, 2)], '现价': [892.25]})
+        market_time = datetime(2026, 7, 27, 9, 0, tzinfo=gold_service.MARKET_TIMEZONE)
+
+        records = gold_service.serialize_sge_records(quotes, market_time=market_time)
+
+        self.assertEqual(records[0]['时间'], '2026-07-27T09:00:02+08:00')
+
+    def test_close_tick_is_serialized_and_does_not_break_realtime_api(self):
+        quotes = pd.DataFrame({'时间': [time(15, 29), time(15, 30)], '现价': [892.25, 892.30]})
+        market_time = datetime(2026, 7, 27, 15, 31, tzinfo=gold_service.MARKET_TIMEZONE)
+
+        with (
+            patch.object(gold_service.gold_service, 'get_real_time_sge_price', return_value=quotes),
+            patch.object(gold_service, 'market_now', return_value=market_time),
+        ):
+            response = self.client.get('/api/gold/spot_quotations_sge?symbol=Au99.99')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [item['时间'] for item in response.get_json()['data']],
+            ['2026-07-27T15:29:00+08:00', '2026-07-27T15:30:00+08:00']
+        )
+
+    def test_count_matches_the_rows_actually_returned(self):
+        # 12:00 不属于任何交易时段，该行会被序列化器丢弃；
+        # count 必须描述实际返回的条数，而不是上游原始长度。
+        quotes = pd.DataFrame({'时间': [time(10, 0), time(12, 0)], '现价': [892.25, 892.30]})
+        market_time = datetime(2026, 7, 27, 15, 31, tzinfo=gold_service.MARKET_TIMEZONE)
+
+        with (
+            patch.object(gold_service.gold_service, 'get_real_time_sge_price', return_value=quotes),
+            patch.object(gold_service, 'market_now', return_value=market_time),
+        ):
+            response = self.client.get('/api/gold/spot_quotations_sge?symbol=Au99.99')
+
+        body = response.get_json()
+        self.assertEqual(len(body['data']), 1)
+        self.assertEqual(body['count'], 1)
+
+    def test_duplicate_history_date_keeps_the_last_record(self):
+        # 同一交易日出现多条时以最后一条为准；两个清洗入口必须一致，
+        # 否则同一份历史在 SMA 和 KDJ/MACD 上会得出不同的收盘价。
+        duplicated = pd.DataFrame({
+            'date': ['2026-07-24', '2026-07-24', '2026-07-27'],
+            'high': [12, 15, 16],
+            'low': [8, 9, 10],
+            'close': [10, 11, 12],
+        })
+
+        close_only = gold_service.clean_historical_close_data(duplicated)
+        ohlc = gold_service.clean_historical_ohlc_data(duplicated)
+
+        self.assertEqual(list(close_only['close']), [11, 12])
+        self.assertEqual(list(ohlc['close']), [11, 12])
+        self.assertEqual(list(ohlc['high']), [15, 16])
+
+    def test_ohlc_cleaner_drops_rows_whose_high_is_below_its_low(self):
+        malformed = pd.DataFrame({
+            'date': ['2026-07-24', '2026-07-27'],
+            'high': [5, 16],
+            'low': [9, 10],
+            'close': [7, 12],
+        })
+
+        cleaned = gold_service.clean_historical_ohlc_data(malformed)
+
+        self.assertEqual(list(cleaned['close']), [12])
+
+    def test_serializers_emit_null_for_missing_rolling_values(self):
+        # 滚动窗口前几行本就没有值，必须序列化为 null 而不是 NaN
+        # （NaN 不是合法 JSON，会让整条响应无法解析）。
+        frame = pd.DataFrame({
+            'date': [pd.Timestamp('2026-07-27')],
+            'close': [10.0],
+            'ma5': [float('nan')],
+            'k': [float('nan')],
+            'd': [50.0],
+            'j': [float('nan')],
+        })
+
+        sma = gold_service.serialize_sma_records(frame, [5])
+        kdj = gold_service.serialize_kdj_records(frame)
+
+        self.assertEqual(sma[0], {'date': '2026-07-27', 'close': 10.0, 'ma5': None})
+        self.assertEqual(
+            kdj[0],
+            {'date': '2026-07-27', 'close': 10.0, 'k': None, 'd': 50.0, 'j': None},
+        )
+
+    def test_macd_serializer_keeps_its_fields_required(self):
+        # MACD 的 dif/dea 没有暖机期，NaN 意味着计算坏了，
+        # 不应被静默转成 null 掩盖过去。
+        frame = pd.DataFrame({
+            'date': [pd.Timestamp('2026-07-27')],
+            'close': [10.0],
+            'dif': [1.5],
+            'dea': [1.25],
+        })
+
+        self.assertEqual(
+            gold_service.serialize_macd_records(frame)[0],
+            {'date': '2026-07-27', 'close': 10.0, 'dif': 1.5, 'dea': 1.25},
+        )
+
+    def test_history_date_is_interpreted_the_same_way_on_both_push_paths(self):
+        # 开盘与收盘推送曾各自逐字重复这段归一化；现在共用一个函数。
+        self.assertEqual(
+            gold_service.normalize_history_date('2026-07-27'),
+            gold_service.normalize_history_date(pd.Timestamp('2026-07-27')),
+        )
+        self.assertEqual(
+            gold_service.normalize_history_date(datetime(2026, 7, 27, 15, 30)).isoformat(),
+            '2026-07-27',
+        )
+
     def test_calculates_all_requested_windows_from_complete_history(self):
         response, loader = self.request_with_history(
             daily_history(list(range(1, 41))),

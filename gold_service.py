@@ -18,7 +18,7 @@ import math
 import os
 from functools import wraps
 from flask import Flask, jsonify, request
-from datetime import datetime, time as clock_time
+from datetime import datetime, time as clock_time, timedelta
 from zoneinfo import ZoneInfo
 from push_service import push_manager, MessageTemplate
 
@@ -80,6 +80,54 @@ def market_now():
 def market_timestamp():
     """Return an unambiguous ISO-8601 timestamp with the UTC+08:00 offset."""
     return market_now().isoformat(timespec='milliseconds')
+
+
+def normalize_history_date(value):
+    """Return the calendar date of a historical row's ``date`` field.
+
+    The cached history frame carries either ISO strings or datetime-like
+    values depending on the source path.  Both push routines compare that
+    field against today, so they must interpret it identically.
+    """
+    if isinstance(value, str):
+        return datetime.strptime(value, '%Y-%m-%d').date()
+    return value.date() if hasattr(value, 'date') else value
+
+
+def is_sge_trading_moment(moment):
+    """Whether a Shanghai-clock datetime belongs to the regular SGE sessions."""
+    clock = moment.time()
+    weekday = moment.weekday()  # Monday is 0.
+    return (
+        (weekday in (1, 2, 3, 4, 5) and clock <= clock_time(2, 30)) or
+        (weekday < 5 and (
+            clock_time(9) <= clock <= clock_time(11, 30) or
+            clock_time(13, 30) <= clock <= clock_time(15, 30)
+        )) or
+        (weekday < 5 and clock >= clock_time(20))
+    )
+
+
+def resolve_realtime_quote_datetime(value, market_time):
+    """Restore the calendar date omitted by SGE's time-only realtime rows.
+
+    A stale feed may be read outside trading hours, including weekends.  Rather
+    than assuming every clock time belongs to today's calendar date, walk back
+    to the most recent calendar date on which that clock time is a valid SGE
+    session.  This keeps, for example, Friday 09:00 and 11:00 ticks on Friday
+    when the same feed is read on Saturday morning.
+    """
+    candidate = datetime.combine(market_time.date(), value, tzinfo=MARKET_TIMEZONE)
+    tolerance = timedelta(minutes=5) if is_sge_trading_moment(market_time) else timedelta()
+    if candidate > market_time + tolerance:
+        candidate -= timedelta(days=1)
+
+    for _ in range(7):
+        if is_sge_trading_moment(candidate):
+            return candidate
+        candidate -= timedelta(days=1)
+
+    return None
 
 
 def historical_cache_ttl_seconds(now=None):
@@ -334,12 +382,8 @@ class GoldService:
         spot_data = self.get_real_time_gold_price()
 
         if spot_data is not None and not spot_data.empty:
-            # 查找9:00:00的记录作为开盘价
-            from datetime import time as dt_time
-            nine_am = dt_time(9, 0, 0)
-
-            # 筛选9点的数据
-            nine_oclock_data = spot_data[spot_data['时间'] == nine_am]
+            # 筛选 9 点的数据作为开盘价
+            nine_oclock_data = spot_data[spot_data['时间'] == clock_time(9)]
 
             if not nine_oclock_data.empty:
                 # 使用9点的现价作为开盘价
@@ -358,15 +402,9 @@ class GoldService:
             if hist_data_full is not None and not hist_data_full.empty:
                 # 获取最后一条历史记录
                 last_hist = hist_data_full.iloc[-1]
-                last_date = last_hist.get('date')
 
                 # 检查是否是今天的数据
-                from datetime import datetime as dt
-                if isinstance(last_date, str):
-                    record_date = dt.strptime(last_date, '%Y-%m-%d').date()
-                else:
-                    record_date = last_date.date() if hasattr(last_date, 'date') else last_date
-
+                record_date = normalize_history_date(last_hist.get('date'))
                 current_date = market_now().date()
 
                 # 如果最后一条是今天的,前一日收盘是倒数第二条
@@ -432,15 +470,9 @@ class GoldService:
         if hist_data_full is not None and not hist_data_full.empty:
             # 检查最后一条记录的日期
             last_record = hist_data_full.iloc[-1]
-            last_date = last_record.get('date')
 
             # 转换日期进行比较
-            from datetime import datetime as dt
-            if isinstance(last_date, str):
-                record_date = dt.strptime(last_date, '%Y-%m-%d').date()
-            else:
-                record_date = last_date.date() if hasattr(last_date, 'date') else last_date
-
+            record_date = normalize_history_date(last_record.get('date'))
             current_date = market_now().date()
 
             # 判断最后一条是否是今天的数据
@@ -618,7 +650,7 @@ def push_response(success, message):
 
 @app.route('/')
 def index():
-    """首页 - Vue.js版本"""
+    """后台配置页。"""
     from flask import render_template
     return render_template('index.html')
 
@@ -630,22 +662,29 @@ def serialize_sge_records(data, historical=False, market_time=None):
     infer a trading day from their own clock.
     """
     market_time = market_time or market_now()
-    data_dict = data.to_dict('records')
-    for record in data_dict:
+    market_time = (
+        market_time.replace(tzinfo=MARKET_TIMEZONE)
+        if market_time.tzinfo is None
+        else market_time.astimezone(MARKET_TIMEZONE)
+    )
+    serialized_records = []
+    for record in data.to_dict('records'):
+        discard_record = False
         for key, value in record.items():
             if not historical and key == '时间':
                 if isinstance(value, str):
                     try:
                         value = clock_time.fromisoformat(value)
                     except ValueError:
-                        # Keep unexpected source values visible instead of
-                        # silently replacing them with an invented timestamp.
-                        continue
+                        discard_record = True
+                        break
 
                 if isinstance(value, clock_time):
-                    record[key] = datetime.combine(
-                        market_time.date(), value, tzinfo=MARKET_TIMEZONE
-                    ).isoformat(timespec='seconds')
+                    quote_time = resolve_realtime_quote_datetime(value, market_time)
+                    if quote_time is None:
+                        discard_record = True
+                        break
+                    record[key] = quote_time.isoformat(timespec='seconds')
                     continue
 
             if hasattr(value, 'strftime'):
@@ -665,30 +704,46 @@ def serialize_sge_records(data, historical=False, market_time=None):
                     record[key] = value.isoformat(timespec='seconds')
                 else:
                     record[key] = value.strftime('%Y-%m-%d')
-    return data_dict
+        if not discard_record:
+            serialized_records.append(record)
+    return serialized_records
 
 
-def clean_historical_close_data(data):
-    """Return ordered, de-duplicated SGE daily dates and numeric close prices.
+def _clean_daily_history(data, value_columns, row_filter=None):
+    """Shared cleaning skeleton for every daily-history indicator input.
 
-    Source data is intentionally cleaned before rolling calculations: trading
-    dates are sorted ascending, malformed dates/prices are ignored, and a
-    duplicate date keeps the last source record.
+    Trading dates are normalised and sorted ascending, the requested value
+    columns are coerced to finite numbers, malformed rows are dropped, and a
+    duplicated date keeps the last source record.
+
+    Indicator-specific checks belong in ``row_filter`` rather than in extra
+    parameters here: this function exists to hold the invariant every caller
+    shares, not to become a switchboard for each indicator's semantics.
     """
+    columns = ['date', *value_columns]
     if data is None or data.empty:
-        return pd.DataFrame(columns=['date', 'close'])
+        return pd.DataFrame(columns=columns)
 
-    if 'date' not in data.columns or 'close' not in data.columns:
-        raise ValueError('历史行情缺少 date 或 close 字段')
+    missing_columns = set(columns).difference(data.columns)
+    if missing_columns:
+        raise ValueError(f"历史行情缺少 {'、'.join(sorted(missing_columns))} 字段")
 
-    cleaned = data.loc[:, ['date', 'close']].copy()
+    cleaned = data.loc[:, columns].copy()
     cleaned['date'] = pd.to_datetime(cleaned['date'], errors='coerce').dt.normalize()
-    cleaned['close'] = pd.to_numeric(cleaned['close'], errors='coerce')
-    cleaned = cleaned.dropna(subset=['date', 'close'])
-    cleaned = cleaned[cleaned['close'].map(math.isfinite)]
+    for column in value_columns:
+        cleaned[column] = pd.to_numeric(cleaned[column], errors='coerce')
+    cleaned = cleaned.dropna(subset=columns)
+    cleaned = cleaned[cleaned[value_columns].map(math.isfinite).all(axis=1)]
+    if row_filter is not None:
+        cleaned = cleaned[row_filter(cleaned)]
     cleaned = cleaned.sort_values('date', kind='stable')
     cleaned = cleaned.drop_duplicates(subset=['date'], keep='last')
     return cleaned.reset_index(drop=True)
+
+
+def clean_historical_close_data(data):
+    """Return ordered, de-duplicated SGE daily dates and numeric close prices."""
+    return _clean_daily_history(data, ['close'])
 
 
 def calculate_sma_indicators(history_data, windows):
@@ -749,20 +804,34 @@ def parse_sma_indicator_parameters():
     return days, windows
 
 
-def serialize_sma_records(data, windows):
-    """Convert a calculated SMA data frame into the public response shape."""
+def _serialize_indicator_records(data, optional_fields=(), required_fields=()):
+    """Shared shape for indicator responses: ``date``, ``close``, then values.
+
+    ``optional_fields`` serialise NaN as null — the leading rows of a rolling
+    window legitimately have no value yet.  ``required_fields`` are always
+    numeric; a NaN there means the calculation is broken and should surface
+    rather than be silently nulled.
+    """
     records = []
     for _, row in data.iterrows():
-        date = row['date']
         record = {
-            'date': date.strftime('%Y-%m-%d'),
+            'date': row['date'].strftime('%Y-%m-%d'),
             'close': float(row['close']),
         }
-        for window in windows:
-            value = row[f'ma{window}']
-            record[f'ma{window}'] = None if pd.isna(value) else float(value)
+        for field in optional_fields:
+            value = row[field]
+            record[field] = None if pd.isna(value) else float(value)
+        for field in required_fields:
+            record[field] = float(row[field])
         records.append(record)
     return records
+
+
+def serialize_sma_records(data, windows):
+    """Convert a calculated SMA data frame into the public response shape."""
+    return _serialize_indicator_records(
+        data, optional_fields=[f'ma{window}' for window in windows]
+    )
 
 
 def sma_indicator_response(symbol, metal_name, unit):
@@ -824,27 +893,16 @@ def sma_indicator_response(symbol, metal_name, unit):
 
 
 def clean_historical_ohlc_data(data):
-    """Return ordered valid daily high-low-close data for range indicators."""
-    if data is None or data.empty:
-        return pd.DataFrame(columns=['date', 'high', 'low', 'close'])
+    """Return ordered valid daily high-low-close data for range indicators.
 
-    required_columns = {'date', 'high', 'low', 'close'}
-    missing_columns = required_columns.difference(data.columns)
-    if missing_columns:
-        raise ValueError(f"历史行情缺少 {'、'.join(sorted(missing_columns))} 字段")
-
-    cleaned = data.loc[:, ['date', 'high', 'low', 'close']].copy()
-    cleaned['date'] = pd.to_datetime(cleaned['date'], errors='coerce').dt.normalize()
-    for column in ('high', 'low', 'close'):
-        cleaned[column] = pd.to_numeric(cleaned[column], errors='coerce')
-    cleaned = cleaned.dropna(subset=['date', 'high', 'low', 'close'])
-    cleaned = cleaned[
-        cleaned[['high', 'low', 'close']].map(math.isfinite).all(axis=1)
-        & (cleaned['high'] >= cleaned['low'])
-    ]
-    cleaned = cleaned.sort_values('date', kind='stable')
-    cleaned = cleaned.drop_duplicates(subset=['date'], keep='last')
-    return cleaned.reset_index(drop=True)
+    Adds the one check the close-only history cannot express: a row whose high
+    is below its low is malformed and must not reach a range calculation.
+    """
+    return _clean_daily_history(
+        data,
+        ['high', 'low', 'close'],
+        row_filter=lambda frame: frame['high'] >= frame['low'],
+    )
 
 
 def calculate_kdj_indicators(history_data):
@@ -880,16 +938,7 @@ def calculate_kdj_indicators(history_data):
 
 def serialize_kdj_records(data):
     """Convert calculated KDJ rows into JSON-safe public API records."""
-    records = []
-    for _, row in data.iterrows():
-        record = {
-            'date': row['date'].strftime('%Y-%m-%d'),
-            'close': float(row['close']),
-        }
-        for field in ('k', 'd', 'j'):
-            record[field] = None if pd.isna(row[field]) else float(row[field])
-        records.append(record)
-    return records
+    return _serialize_indicator_records(data, optional_fields=('k', 'd', 'j'))
 
 
 def kdj_indicator_response(symbol, metal_name, unit):
@@ -972,15 +1021,7 @@ def calculate_macd_indicators(history_data):
 
 def serialize_macd_records(data):
     """Convert calculated MACD rows into JSON-safe public API records."""
-    records = []
-    for _, row in data.iterrows():
-        records.append({
-            'date': row['date'].strftime('%Y-%m-%d'),
-            'close': float(row['close']),
-            'dif': float(row['dif']),
-            'dea': float(row['dea']),
-        })
-    return records
+    return _serialize_indicator_records(data, required_fields=('dif', 'dea'))
 
 
 def macd_indicator_response(symbol, metal_name, unit):
@@ -1047,11 +1088,21 @@ def realtime_sge_response(symbol, metal_name):
         data = gold_service.get_real_time_sge_price(symbol)
         if data is not None and not data.empty:
             response_time = market_now()
+            # Rows whose clock time cannot be placed on a trading day are
+            # dropped by the serializer, so count must describe what is
+            # actually returned rather than the raw upstream length.
+            records = serialize_sge_records(data, market_time=response_time)
+            discarded = len(data) - len(records)
+            if discarded:
+                logger.warning(
+                    '%s 实时行情丢弃 %d 条无法归入交易时段的报价（上游 %d 条）',
+                    symbol, discarded, len(data),
+                )
             result = {
                 "status": "success",
                 "timestamp": response_time.isoformat(timespec='milliseconds'),
-                "data": serialize_sge_records(data, market_time=response_time),
-                "count": len(data)
+                "data": records,
+                "count": len(records)
             }
             return jsonify(result)
         else:
