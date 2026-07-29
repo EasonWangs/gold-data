@@ -1,0 +1,41 @@
+services:
+  web:
+    build:
+      context: .
+    image: gold-data:latest
+    container_name: gold-data-web
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    command: ["waitress-serve", "--host=0.0.0.0", "--port=5080", "gold_service:app"]
+    ports:
+      - "${GOLD_HOST_PORT:-5080}:5080"
+    volumes:
+      - ./dingtalk_config.json:/app/dingtalk_config.json:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "from urllib.request import urlopen; urlopen('http://127.0.0.1:5080/api/info', timeout=5)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  scheduler:
+    image: gold-data:latest
+    container_name: gold-data-scheduler
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    command: ["python", "gold_service.py", "--scheduler-only"]
+    volumes:
+      - ./dingtalk_config.json:/app/dingtalk_config.json:ro
+    depends_on:
+      web:
+        condition: service_healthy

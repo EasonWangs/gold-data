@@ -8,6 +8,19 @@
 
 ## 🚀 快速开始
 
+### NAS Docker 部署
+
+项目已提供 Docker Compose 编排：Web/API 与定时推送调度器会以两个容器运行，确保定时推送只有一个实例。
+
+```bash
+cp .env.example .env
+cp dingtalk_config.example.json dingtalk_config.json
+# 编辑 .env 和 dingtalk_config.json，填入管理令牌和钉钉 Webhook
+docker compose up -d --build
+```
+
+完整的 NAS、反向代理和更新说明见 [NAS_DEPLOYMENT.md](NAS_DEPLOYMENT.md)。
+
 ### 安装依赖
 ```bash
 # 在项目目录创建独立虚拟环境，避免修改系统或 Homebrew 管理的 Python

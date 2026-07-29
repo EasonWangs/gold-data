@@ -1,0 +1,12 @@
+.git
+.gitignore
+.DS_Store
+.env
+.venv
+__pycache__
+*.py[cod]
+*.log
+.pytest_cache
+.planning
+.claude
+dingtalk_config.json
