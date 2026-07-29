@@ -130,6 +130,10 @@ createApp({
             await this.performPush('/api/push/closing', '推送收盘价');
         },
 
+        async pushNightOpening() {
+            await this.performPush('/api/push/night-opening', '推送夜盘开盘价');
+        },
+
         async performPush(endpoint, action) {
             this.loading.push = true;
             this.pushMessage = null;

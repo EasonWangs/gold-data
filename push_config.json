@@ -1,31 +1,21 @@
 {
-  "push_services": {
-    "dingtalk": {
-      "enabled": true,
-      "name": "钉钉推送",
-      "config_file": "dingtalk_config.json"
-    }
-  },
-  "push_rules": {
-    "opening_price": {
-      "enabled": true,
-      "time": "09:00",
-      "weekdays_only": true,
-      "services": ["dingtalk"],
-      "template": "opening_price"
+  "note": "此文件是推送规则说明样例；当前运行时规则由 gold_service.py 的 SCHEDULED_PUSH_TIMES 统一定义，避免配置与实现漂移。",
+  "data_source": "上海黄金交易所 Au99.99（经 AkShare 获取）",
+  "timezone": "Asia/Shanghai",
+  "scheduled_pushes": {
+    "day_opening": {
+      "time": "09:02",
+      "quote_window": "09:00–09:05",
+      "trading_day": "当日"
     },
-    "closing_price": {
-      "enabled": true,
-      "time": "16:00",
-      "weekdays_only": true,
-      "services": ["dingtalk"],
-      "template": "closing_price"
+    "daily_settlement": {
+      "time": "16:02",
+      "requires": "官方当日完整日线已发布"
+    },
+    "night_opening": {
+      "time": "20:02",
+      "quote_window": "20:00–20:05",
+      "trading_day": "下一交易日；周五夜盘归属下周一"
     }
-  },
-  "custom_templates": {},
-  "notification_settings": {
-    "retry_on_failure": true,
-    "max_retries": 3,
-    "retry_delay": 60
   }
 }

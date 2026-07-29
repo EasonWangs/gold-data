@@ -73,6 +73,27 @@ class SmaIndicatorApiTests(unittest.TestCase):
 
         self.assertEqual(records[0]['时间'], '2026-07-27T14:30:05+08:00')
 
+    def test_market_session_labels_night_quotes_with_the_next_trading_day(self):
+        friday_evening = datetime(2026, 7, 24, 20, 2, tzinfo=gold_service.MARKET_TIMEZONE)
+        saturday_early = datetime(2026, 7, 25, 1, 0, tzinfo=gold_service.MARKET_TIMEZONE)
+
+        friday_status = gold_service.get_sge_session_status(friday_evening)
+        saturday_status = gold_service.get_sge_session_status(saturday_early)
+
+        self.assertEqual(friday_status['session'], 'night')
+        self.assertEqual(friday_status['trading_day'], '2026-07-27')
+        self.assertEqual(saturday_status['session'], 'night')
+        self.assertEqual(saturday_status['trading_day'], '2026-07-27')
+
+    def test_market_session_endpoint_exposes_timezone_and_daily_bar_semantics(self):
+        response = self.client.get('/api/market/session')
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body['status'], 'success')
+        self.assertEqual(body['market']['timezone'], 'Asia/Shanghai')
+        self.assertIn('夜盘', body['market']['daily_bar_note'])
+
     def test_realtime_quotes_from_a_stale_weekend_feed_keep_their_trading_day(self):
         quotes = pd.DataFrame({'时间': [time(9), time(11), time(1)], '现价': [890, 891, 892]})
         saturday_morning = datetime(2026, 7, 25, 10, 0, tzinfo=gold_service.MARKET_TIMEZONE)
@@ -122,6 +143,21 @@ class SmaIndicatorApiTests(unittest.TestCase):
         body = response.get_json()
         self.assertEqual(len(body['data']), 1)
         self.assertEqual(body['count'], 1)
+
+    def test_realtime_response_includes_symbol_unit_and_market_metadata(self):
+        quotes = pd.DataFrame({'时间': [time(9, 0)], '现价': [892.25]})
+        market_time = datetime(2026, 7, 27, 9, 1, tzinfo=gold_service.MARKET_TIMEZONE)
+
+        with (
+            patch.object(gold_service.gold_service, 'get_real_time_sge_price', return_value=quotes),
+            patch.object(gold_service, 'market_now', return_value=market_time),
+        ):
+            response = self.client.get('/api/gold/spot_quotations_sge')
+
+        body = response.get_json()
+        self.assertEqual(body['symbol'], gold_service.GOLD_SYMBOL)
+        self.assertEqual(body['unit'], gold_service.GOLD_UNIT)
+        self.assertEqual(body['market']['trading_day'], '2026-07-27')
 
     def test_duplicate_history_date_keeps_the_last_record(self):
         # 同一交易日出现多条时以最后一条为准；两个清洗入口必须一致，
@@ -333,6 +369,28 @@ class SmaIndicatorApiTests(unittest.TestCase):
 
         self.assertEqual(source.call_count, 1)
 
+    def test_settlement_can_force_a_history_refresh_past_the_regular_cache(self):
+        service = gold_service.GoldService()
+        first = daily_history([1, 2])
+        refreshed = daily_history([1, 2, 3])
+        with patch.object(gold_service.ak, 'spot_hist_sge', side_effect=[first, refreshed]) as source:
+            service.get_historical_sge_price(gold_service.GOLD_SYMBOL, days=None)
+            data = service.get_historical_sge_price(
+                gold_service.GOLD_SYMBOL,
+                days=None,
+                force_refresh=True,
+            )
+
+        self.assertEqual(source.call_count, 2)
+        self.assertEqual(data['close'].tolist(), [1, 2, 3])
+
+    def test_history_api_rejects_non_positive_or_non_numeric_days(self):
+        for query in ('days=0', 'days=-3', 'days=bad'):
+            with self.subTest(query=query):
+                response = self.client.get(f'/api/gold/spot_hist_sge?{query}')
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.get_json()['status'], 'error')
+
     def test_historical_cache_ttl_is_shorter_during_weekday_day_session(self):
         trading_time = datetime(2026, 7, 27, 10, 0, tzinfo=gold_service.MARKET_TIMEZONE)
         off_hours = datetime(2026, 7, 27, 18, 0, tzinfo=gold_service.MARKET_TIMEZONE)
@@ -414,6 +472,33 @@ class SmaIndicatorApiTests(unittest.TestCase):
         )
 
         self.assertEqual(quotes['现价'].tolist(), [770.0, 771.2, 771.5])
+
+    def test_night_opening_push_uses_the_next_trading_day_and_first_quote(self):
+        service = gold_service.GoldService()
+        night_start = datetime(2026, 7, 27, 20, 2, tzinfo=gold_service.MARKET_TIMEZONE)
+        quotes = pd.DataFrame({
+            '时间': [time(20, 2), time(20, 0), time(20, 4)],
+            '现价': [900.2, 900.0, 900.4],
+        })
+        history = pd.DataFrame({
+            'date': ['2026-07-24', '2026-07-27'],
+            'close': [895.0, 898.0],
+        })
+
+        with (
+            patch.object(gold_service, 'market_now', return_value=night_start),
+            patch.object(service, 'get_real_time_gold_price', return_value=quotes),
+            patch.object(service, 'get_historical_gold_price', return_value=history),
+            patch.object(service, 'send_message', return_value=True) as send,
+        ):
+            success, message = service.push_night_opening_price()
+
+        self.assertTrue(success)
+        self.assertEqual(message, '夜盘开盘价格推送成功')
+        sent_message = send.call_args.args[0]
+        self.assertIn('所属交易日:** 2026-07-28', sent_message)
+        self.assertIn('首个有效报价:** 20:00:00', sent_message)
+        self.assertIn('900.0 元/克', sent_message)
 
 
 if __name__ == '__main__':

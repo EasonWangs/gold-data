@@ -61,9 +61,18 @@ KDJ_SMOOTHING_PERIOD = 3
 MACD_FAST_PERIOD = 12
 MACD_SLOW_PERIOD = 26
 MACD_SIGNAL_PERIOD = 9
+API_VERSION = '2.1.0'
+DATA_SOURCE = '上海黄金交易所行情（经 AkShare 获取）'
+SGE_SESSION_SCHEDULE = (
+    {'name': 'night', 'label': '夜盘', 'time': '20:00–次日 02:30'},
+    {'name': 'day_morning', 'label': '日盘上午', 'time': '09:00–11:30'},
+    {'name': 'day_afternoon', 'label': '日盘下午', 'time': '13:30–15:30'},
+)
 SCHEDULED_PUSH_TIMES = {
-    '09:00': ('opening', '开盘', lambda: gold_service.push_opening_price()),
-    '16:00': ('closing', '收盘', lambda: gold_service.push_closing_price()),
+    # Give the upstream minute feed time to publish the session's first quote.
+    '09:02': ('day_opening', '日盘开盘', lambda: gold_service.push_opening_price()),
+    '16:02': ('daily_settlement', '日线收盘', lambda: gold_service.push_closing_price()),
+    '20:02': ('night_opening', '夜盘开盘', lambda: gold_service.push_night_opening_price()),
 }
 SCHEDULER_CONTROL_MESSAGE = (
     '定时推送仅能由独立调度进程管理；请使用 '
@@ -80,6 +89,68 @@ def market_now():
 def market_timestamp():
     """Return an unambiguous ISO-8601 timestamp with the UTC+08:00 offset."""
     return market_now().isoformat(timespec='milliseconds')
+
+
+def _next_weekday(value):
+    """Return ``value`` moved forward to the next Monday–Friday date."""
+    while value.weekday() >= 5:
+        value += timedelta(days=1)
+    return value
+
+
+def get_sge_trading_day(moment=None):
+    """Return the SGE trading-date label for a Shanghai-market moment.
+
+    The night session opens on the prior calendar evening: Friday 20:00 and
+    Saturday 01:00 therefore belong to the following Monday's trading day.
+    This is a label for API consumers; official daily OHLC remains the source
+    of truth for whether a public holiday is actually tradable.
+    """
+    moment = moment or market_now()
+    moment = (
+        moment.replace(tzinfo=MARKET_TIMEZONE)
+        if moment.tzinfo is None else moment.astimezone(MARKET_TIMEZONE)
+    )
+    clock = moment.time()
+    trading_date = moment.date()
+    if clock >= clock_time(20):
+        trading_date += timedelta(days=1)
+    return _next_weekday(trading_date).isoformat()
+
+
+def get_sge_session_status(moment=None):
+    """Describe the current regular SGE session in a client-safe form."""
+    moment = moment or market_now()
+    moment = (
+        moment.replace(tzinfo=MARKET_TIMEZONE)
+        if moment.tzinfo is None else moment.astimezone(MARKET_TIMEZONE)
+    )
+    clock = moment.time()
+    weekday = moment.weekday()
+    if ((weekday < 5 and clock >= clock_time(20)) or
+            (weekday in (1, 2, 3, 4, 5) and clock <= clock_time(2, 30))):
+        session = 'night'
+        label = '夜盘'
+    elif weekday < 5 and clock_time(9) <= clock <= clock_time(11, 30):
+        session = 'day_morning'
+        label = '日盘上午'
+    elif weekday < 5 and clock_time(13, 30) <= clock <= clock_time(15, 30):
+        session = 'day_afternoon'
+        label = '日盘下午'
+    else:
+        session = 'closed'
+        label = '非连续竞价时段'
+
+    return {
+        'timezone': 'Asia/Shanghai',
+        'market_time': moment.isoformat(timespec='milliseconds'),
+        'trading_day': get_sge_trading_day(moment),
+        'is_trading': session != 'closed',
+        'session': session,
+        'session_label': label,
+        'regular_sessions': SGE_SESSION_SCHEDULE,
+        'daily_bar_note': '一个交易日从前一自然日 20:00 的夜盘开始，并与其后日盘合并为同一根日线；法定节假日以源站实际行情为准。',
+    }
 
 
 def normalize_history_date(value):
@@ -247,12 +318,14 @@ class GoldService:
             logger.error(f"加载钉钉配置失败: {e}")
             return None
 
-    def _get_cached_data(self, cache_key, loader, ttl_seconds, on_refresh=None):
+    def _get_cached_data(self, cache_key, loader, ttl_seconds, on_refresh=None, force_refresh=False):
         """Return fresh cached data and serialize cache misses per process."""
         now = time.monotonic()
         with self._cache_lock:
             cached = self._data_cache.get(cache_key)
             if (
+                not force_refresh
+                and
                 cached
                 and cached['ttl_seconds'] == ttl_seconds
                 and now - cached['cached_at'] < ttl_seconds
@@ -286,14 +359,15 @@ class GoldService:
             logger.error(f"获取 {symbol} 实时价格失败: {e}")
             return None
 
-    def get_historical_sge_price(self, symbol, days=30):
-        """获取历史数据；交易时段缓存 30 分钟，其他时段缓存 12 小时。"""
+    def get_historical_sge_price(self, symbol, days=30, force_refresh=False):
+        """获取历史数据；结算推送可跳过缓存以确认官方最新日线。"""
         try:
             spot_hist_sge_df = self._get_cached_data(
                 f'spot_hist_sge:{symbol}',
                 lambda: ak.spot_hist_sge(symbol=symbol),
                 historical_cache_ttl_seconds(),
                 on_refresh=lambda: self._evict_cached_indicators(symbol),
+                force_refresh=force_refresh,
             )
             if spot_hist_sge_df is None:
                 return None
@@ -326,9 +400,9 @@ class GoldService:
         """获取 Au99.99 实时价格。"""
         return self.get_real_time_sge_price(GOLD_SYMBOL)
 
-    def get_historical_gold_price(self, days=30):
+    def get_historical_gold_price(self, days=30, force_refresh=False):
         """获取 Au99.99 历史价格。"""
-        return self.get_historical_sge_price(GOLD_SYMBOL, days)
+        return self.get_historical_sge_price(GOLD_SYMBOL, days, force_refresh=force_refresh)
 
     def get_gold_price_data(self):
         """获取完整黄金价格数据"""
@@ -361,100 +435,121 @@ class GoldService:
         return self.push_manager.send_message(message, service_name, **kwargs)
 
     def is_trading_day(self):
-        """判断是否为交易日（排除周六周日）"""
-        today = market_now().weekday()  # 0=Monday, 6=Sunday
-        return today < 5  # Monday(0) to Friday(4)
+        """Return whether the current calendar date can host a scheduled push.
+
+        Weekday filtering is deliberately only a first guard.  Official daily
+        data is checked again before a settlement message is delivered, so a
+        public holiday never becomes a fabricated trading-day push.
+        """
+        return market_now().weekday() < 5
 
     def _record_successful_push(self):
         """Record only confirmed deliveries in the local scheduler status."""
         service_status['last_push'] = market_timestamp()
         service_status['push_count'] += 1
 
-    def push_opening_price(self):
-        """推送开盘价格"""
+    @staticmethod
+    def _quote_clock(value):
+        """Normalise an upstream quote's time-only value, or return ``None``."""
+        if isinstance(value, clock_time):
+            return value
+        if isinstance(value, str):
+            try:
+                return clock_time.fromisoformat(value)
+            except ValueError:
+                return None
+        if hasattr(value, 'time'):
+            return value.time()
+        return None
+
+    def _session_open_quote(self, spot_data, session_start):
+        """Return the first quote near a session open without using stale ticks.
+
+        The SGE realtime feed has a time-only column.  The scheduler runs two
+        minutes after the open, and accepts the first quote published in the
+        first five minutes rather than assuming a synthetic exact ``:00`` row.
+        """
+        if spot_data is None or spot_data.empty or '时间' not in spot_data.columns:
+            return None, None
+
+        end_minutes = session_start.hour * 60 + session_start.minute + 5
+        candidates = []
+        for _, row in spot_data.iterrows():
+            quote_time = self._quote_clock(row.get('时间'))
+            if quote_time is None:
+                continue
+            quote_minutes = quote_time.hour * 60 + quote_time.minute
+            if session_start.hour <= quote_time.hour and (
+                session_start.hour * 60 + session_start.minute <= quote_minutes <= end_minutes
+            ):
+                price = pd.to_numeric(pd.Series([row.get('现价')]), errors='coerce').iloc[0]
+                if pd.notna(price) and math.isfinite(float(price)) and price > 0:
+                    candidates.append((quote_time, float(price)))
+
+        return min(candidates, default=(None, None), key=lambda item: item[0])
+
+    def _previous_close_for_trading_day(self, trading_day):
+        """Find the last completed official daily close before ``trading_day``."""
+        history = self.get_historical_gold_price(days=None)
+        if history is None or history.empty or 'close' not in history.columns:
+            return None
+
+        target = datetime.strptime(trading_day, '%Y-%m-%d').date()
+        historical_dates = history['date'].map(normalize_history_date)
+        completed = history.loc[historical_dates < target, 'close']
+        if completed.empty:
+            return None
+        value = pd.to_numeric(pd.Series([completed.iloc[-1]]), errors='coerce').iloc[0]
+        return float(value) if pd.notna(value) and math.isfinite(float(value)) else None
+
+    def _push_session_opening_price(self, session_start, session_label):
+        """Send a day- or night-session opening snapshot using one shared path."""
         if not self.is_trading_day():
-            logger.info("今日为周末，跳过开盘价格推送")
+            logger.info("今日为周末，跳过%s推送", session_label)
             return False, '今日非交易日，未发送开盘价格'
 
-        logger.info("开始推送开盘价格...")
+        logger.info("开始推送%s...", session_label)
 
-        # 获取实时数据,查找9:00的价格作为开盘价
         spot_data = self.get_real_time_gold_price()
+        quote_time, open_price = self._session_open_quote(spot_data, session_start)
+        if open_price is None:
+            logger.error('未获取到 %s 前五分钟内的开盘报价，拒绝发送', session_label)
+            return False, f'未获取到{session_label}开盘报价，未发送推送'
 
-        if spot_data is not None and not spot_data.empty:
-            # 筛选 9 点的数据作为开盘价
-            nine_oclock_data = spot_data[spot_data['时间'] == clock_time(9)]
+        status = get_sge_session_status()
+        trading_day = status['trading_day']
+        prev_close = self._previous_close_for_trading_day(trading_day)
+        change = open_price - prev_close if prev_close is not None else 0
+        change_percent = change / prev_close * 100 if prev_close else 0
+        trend_emoji = "📈" if change > 0 else "📉" if change < 0 else "➡️"
+        message_data = {
+            'date': trading_day,
+            'time': quote_time.strftime('%H:%M:%S'),
+            'session_label': session_label,
+            'symbol': 'Au99.99（上海黄金交易所）',
+            'open_price': open_price,
+            'prev_close': f'{prev_close:.2f}' if prev_close is not None else 'N/A',
+            'change': change,
+            'change_percent': change_percent,
+            'trend_emoji': trend_emoji,
+            'link_url': self.link_url,
+        }
+        message = MessageTemplate.format_opening_price_message(message_data)
+        sent = self.send_message(message, title=f'黄金{session_label}开盘播报')
+        if sent:
+            self._record_successful_push()
+            return True, f'{session_label}开盘价格推送成功'
 
-            if not nine_oclock_data.empty:
-                # 使用9点的现价作为开盘价
-                open_price = nine_oclock_data.iloc[0]['现价']
-                logger.info(f"找到9:00开盘价: {open_price}")
-            else:
-                # spot_quotations_sge 的跨零点过滤可能只留下夜盘残片。不能将
-                # 最后一条（例如 02:29）静默伪装成 09:00 的开盘价。
-                logger.error('未获取到 09:00 开盘价，拒绝发送开盘推送')
-                return False, '未获取到 09:00 开盘价，未发送开盘价格'
+        logger.error('钉钉未接受%s开盘播报', session_label)
+        return False, '钉钉未接受开盘价格推送'
 
-            # 获取前一日收盘价
-            hist_data_full = self.get_historical_gold_price()
-            prev_close = 'N/A'
+    def push_opening_price(self):
+        """推送日盘首个有效报价（09:00–09:05）。"""
+        return self._push_session_opening_price(clock_time(9), '日盘')
 
-            if hist_data_full is not None and not hist_data_full.empty:
-                # 获取最后一条历史记录
-                last_hist = hist_data_full.iloc[-1]
-
-                # 检查是否是今天的数据
-                record_date = normalize_history_date(last_hist.get('date'))
-                current_date = market_now().date()
-
-                # 如果最后一条是今天的,前一日收盘是倒数第二条
-                if record_date == current_date and len(hist_data_full) >= 2:
-                    prev_close = hist_data_full.iloc[-2]['close']
-                else:
-                    # 否则最后一条就是前一日收盘
-                    prev_close = last_hist['close']
-
-            # 计算涨跌额和涨跌幅
-            if isinstance(prev_close, (int, float)) and prev_close != 0:
-                change = open_price - prev_close
-                change_percent = (change / prev_close) * 100
-            else:
-                change = 0
-                change_percent = 0
-
-            # 涨跌表情
-            trend_emoji = "📈" if change > 0 else "📉" if change < 0 else "➡️"
-
-            # 准备消息数据
-            message_data = {
-                'date': market_now().strftime('%Y-%m-%d'),
-                'time': market_now().strftime('%H:%M:%S'),
-                'symbol': 'Au99.99 (上海黄金交易所)',
-                'open_price': open_price,
-                'prev_close': prev_close if isinstance(prev_close, (int, float)) else 'N/A',
-                'change': change,
-                'change_percent': change_percent,
-                'trend_emoji': trend_emoji,
-                'link_url': self.link_url
-            }
-
-            message = MessageTemplate.format_opening_price_message(message_data)
-            sent = self.send_message(message, title="黄金开盘价格播报")
-            if sent:
-                self._record_successful_push()
-                return True, '开盘价格推送成功'
-
-            logger.error('开盘价格推送未被钉钉接受')
-            return False, '钉钉未接受开盘价格推送'
-        else:
-            error_data = {
-                'date': market_now().strftime('%Y-%m-%d'),
-                'time': market_now().strftime('%H:%M:%S'),
-                'link_url': self.link_url
-            }
-            error_msg = MessageTemplate.format_error_message(error_data)
-            self.send_message(error_msg, title="数据获取失败")
-            return False, '无法获取开盘价格数据'
+    def push_night_opening_price(self):
+        """推送夜盘首个有效报价（20:00–20:05）。"""
+        return self._push_session_opening_price(clock_time(20), '夜盘')
 
     def push_closing_price(self):
         """推送收盘价格"""
@@ -465,7 +560,9 @@ class GoldService:
         logger.info("开始推送收盘价格...")
 
         # 获取历史数据并检查日期
-        hist_data_full = self.get_historical_gold_price()
+        # Settlement must not rely on a 30-minute intraday cache: the source
+        # may publish the official daily bar shortly after the day session.
+        hist_data_full = self.get_historical_gold_price(force_refresh=True)
 
         if hist_data_full is not None and not hist_data_full.empty:
             # 检查最后一条记录的日期
@@ -1101,6 +1198,10 @@ def realtime_sge_response(symbol, metal_name):
             result = {
                 "status": "success",
                 "timestamp": response_time.isoformat(timespec='milliseconds'),
+                "symbol": symbol,
+                "unit": GOLD_UNIT if symbol == GOLD_SYMBOL else SILVER_UNIT,
+                "data_source": DATA_SOURCE,
+                "market": get_sge_session_status(response_time),
                 "data": records,
                 "count": len(records)
             }
@@ -1122,29 +1223,51 @@ def realtime_sge_response(symbol, metal_name):
 def historical_sge_response(symbol, metal_name):
     """Build a historical SGE API response for a metal symbol."""
     try:
-        days = request.args.get('days', type=int)
-        data = gold_service.get_historical_sge_price(symbol, days)
-        if data is not None and not data.empty:
-            result = {
-                "status": "success",
-                "timestamp": market_timestamp(),
-                "data": serialize_sge_records(data, historical=True),
-                "count": len(data),
-                "days": days or "all"
-            }
-            return jsonify(result)
+        raw_days = request.args.get('days')
+        if raw_days is None or raw_days == '':
+            days = None
         else:
-            return jsonify({
-                "status": "error",
-                "message": f"无法获取历史{metal_name}价格数据",
-                "timestamp": market_timestamp()
-            }), 500
+            try:
+                days = int(raw_days)
+            except ValueError:
+                raise ValueError('days 必须为正整数')
+            if days <= 0:
+                raise ValueError('days 必须为正整数')
+    except ValueError as error:
+        return jsonify({
+            "status": "error",
+            "message": str(error),
+            "timestamp": market_timestamp()
+        }), 400
+
+    try:
+        data = gold_service.get_historical_sge_price(symbol, days)
     except Exception as e:
         return jsonify({
             "status": "error",
             "message": str(e),
             "timestamp": market_timestamp()
         }), 500
+
+    if data is None or data.empty:
+        return jsonify({
+            "status": "error",
+            "message": f"无法获取历史{metal_name}价格数据",
+            "timestamp": market_timestamp()
+        }), 500
+
+    return jsonify({
+        "status": "success",
+        "timestamp": market_timestamp(),
+        "symbol": symbol,
+        "unit": GOLD_UNIT if symbol == GOLD_SYMBOL else SILVER_UNIT,
+        "data_source": DATA_SOURCE,
+        "market": get_sge_session_status(),
+        "data": serialize_sge_records(data, historical=True),
+        "count": len(data),
+        "days": days or "all",
+        "daily_bar_note": '历史日线按上金所交易日聚合，包含该交易日前一自然日夜盘与其后日盘。'
+    })
 
 
 # 黄金与白银价格 API
@@ -1194,8 +1317,10 @@ def api_gold_info():
     """贵金属 API 信息接口。"""
     return jsonify({
         "name": "贵金属价格API服务",
-        "version": "2.0.0",
-        "description": "提供上海黄金交易所 Au99.99 与 Ag99.99 的实时和历史价格数据",
+        "version": API_VERSION,
+        "description": "提供上金所 Au99.99 与 Ag99.99 的实时分时和交易日日线数据",
+        "data_source": DATA_SOURCE,
+        "market": get_sge_session_status(),
         "endpoints": {
             "/api/gold/spot_quotations_sge": "获取实时黄金价格",
             "/api/gold/spot_hist_sge": "获取历史黄金价格",
@@ -1204,13 +1329,23 @@ def api_gold_info():
             "/api/gold/indicators/macd": "获取黄金日线 MACD（DIF、DEA）指标",
             "/api/silver/spot_quotations_sge": "获取实时白银价格",
             "/api/silver/spot_hist_sge": "获取历史白银价格",
+            "/api/market/session": "获取上金所常规交易时段与当前交易日归属",
             "/api/gold/info": "API信息"
         },
-        "data_source": "上海黄金交易所",
         "symbols": {
-            "gold": GOLD_SYMBOL,
-            "silver": SILVER_SYMBOL
+            "gold": {"symbol": GOLD_SYMBOL, "unit": GOLD_UNIT},
+            "silver": {"symbol": SILVER_SYMBOL, "unit": SILVER_UNIT}
         }
+    })
+
+
+@app.route('/api/market/session', methods=['GET'])
+def api_market_session():
+    """Return the regular SGE session calendar and the current market state."""
+    return jsonify({
+        'status': 'success',
+        'data_source': DATA_SOURCE,
+        'market': get_sge_session_status(),
     })
 
 # 推送服务 API
@@ -1223,6 +1358,12 @@ def api_service_status():
         'scheduler_mode': 'external-process',
         'scheduler_status': '由进程管理器和调度进程日志提供',
         'message': '定时推送由独立调度进程管理，Web Worker 不提供其运行状态',
+        'scheduled_pushes': {
+            'day_opening': '工作日 09:02（取 09:00–09:05 首个有效报价）',
+            'daily_settlement': '工作日 16:02（仅官方当日完整日线已发布时发送）',
+            'night_opening': '工作日 20:02（归属下一交易日，取 20:00–20:05 首个有效报价）',
+        },
+        'market': get_sge_session_status(),
         'timestamp': market_timestamp()
     })
 
@@ -1298,32 +1439,51 @@ def api_push_closing():
             'timestamp': market_timestamp()
         }), 500
 
+
+@app.route('/api/push/night-opening', methods=['POST'])
+@require_admin_token
+def api_push_night_opening():
+    """推送夜盘开盘快报。"""
+    try:
+        success, message = gold_service.push_night_opening_price()
+        return push_response(success, message)
+    except Exception as e:
+        logger.error(f"夜盘开盘推送失败: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': f'夜盘开盘推送失败: {str(e)}',
+            'timestamp': market_timestamp()
+        }), 500
+
 @app.route('/api/info', methods=['GET'])
 def api_info():
     """服务信息"""
     return jsonify({
         'name': '贵金属价格服务',
-        'version': '2.0.0',
-        'description': '集成黄金价格API和钉钉推送功能的统一服务',
+        'version': API_VERSION,
+        'description': '集成上金所实时分时、交易日日线与钉钉快报的服务',
         'features': {
-            'gold_api': '上海黄金交易所 Au99.99 价格数据',
-            'silver_api': '上海黄金交易所 Ag99.99 价格数据',
-            'dingtalk_push': '定时推送到钉钉群',
+            'gold_api': '上金所 Au99.99 实时分时与交易日日线',
+            'silver_api': '上金所 Ag99.99 实时分时与交易日日线',
+            'dingtalk_push': '日盘、日线收盘、夜盘三个时点的钉钉快报',
             'web_interface': 'Web管理界面'
         },
         'endpoints': {
             '/': 'Web管理界面',
             '/api/gold/*': '黄金价格API',
             '/api/silver/*': '白银价格API',
-            '/api/service/*': '推送服务管理',
+            '/api/market/session': '交易时段与交易日归属',
+            '/api/service/status': '推送调度说明（需管理令牌）',
             '/api/push/*': '推送功能',
             '/api/info': '服务信息'
         },
         'schedule': {
-            'opening': '工作日 09:00',
-            'closing': '工作日 16:00'
+            'day_opening': '工作日 09:02',
+            'daily_settlement': '工作日 16:02',
+            'night_opening': '工作日 20:02（归属下一交易日）'
         },
-        'data_source': '上海黄金交易所',
+        'data_source': DATA_SOURCE,
+        'market': get_sge_session_status(),
         'symbols': {
             'gold': GOLD_SYMBOL,
             'silver': SILVER_SYMBOL

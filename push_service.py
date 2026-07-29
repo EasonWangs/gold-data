@@ -10,6 +10,7 @@ import requests
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +106,7 @@ class DingTalkPushService(PushServiceBase):
         test_message = f"""# 🧪 钉钉推送测试消息
 
 
-**⏰ 测试时间:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**⏰ 测试时间:** {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S')}（Asia/Shanghai）
 
 **🔧 功能:** 黄金价格推送服务
 
@@ -173,10 +174,12 @@ class MessageTemplate:
     """消息模板管理"""
 
     # 开盘价消息模板
-    OPENING_PRICE_TEMPLATE = """# 📈 黄金开盘价格播报 📈
+    OPENING_PRICE_TEMPLATE = """# 📈 黄金{session_label}开盘播报
 
 
-**📅 日期:** {date} {time}
+**📅 所属交易日:** {date}
+
+**⏱ 首个有效报价:** {time}（Asia/Shanghai）
 
 **🏅 品种:** {symbol}
 
@@ -189,10 +192,12 @@ class MessageTemplate:
 🔗 [查看详细数据]({link_url})"""
 
     # 收盘价消息模板
-    CLOSING_PRICE_TEMPLATE = """# 💼 黄金收盘价格播报 💼
+    CLOSING_PRICE_TEMPLATE = """# 💼 黄金日线收盘播报
 
 
-**📅 日期:** {date} {time}
+**📅 交易日:** {date}
+
+**⏱ 推送时间:** {time}（Asia/Shanghai）
 
 **🏅 品种:** {symbol}
 
@@ -205,6 +210,8 @@ class MessageTemplate:
 **📈 前日收盘:** {prev_close} 元/克
 
 **{trend_emoji} 涨跌额:** {change:.2f} 元/克 ({change_percent:.2f}%)
+
+> 日线高低开收包含此前夜盘与当日日盘；并非银行积存金报价。
 
 🔗 [查看详细数据]({link_url})"""
 
