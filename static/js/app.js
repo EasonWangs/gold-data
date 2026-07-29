@@ -127,7 +127,7 @@ createApp({
         },
 
         async pushClosing() {
-            await this.performPush('/api/push/closing', '推送收盘价');
+            await this.performPush('/api/push/closing?mode=latest', '模拟推送收盘价');
         },
 
         async pushNightOpening() {

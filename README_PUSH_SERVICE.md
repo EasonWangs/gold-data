@@ -19,7 +19,7 @@ python gold_service.py --scheduler-only
 | 北京时间 | 快报 | 取值与交易日语义 |
 |---|---|---|
 | 工作日 09:02 | 日盘开盘 | 取 09:00–09:05 的首个有效报价；归属当日交易日。 |
-| 工作日 16:02 | 日线收盘 | 仅当官方当日完整日线已发布时发送；OHLC 含此前夜盘与当日日盘。 |
+| 工作日 16:02 | 日线收盘 | 仅当官方当日完整日线已发布时发送；OHLC 含此前夜盘与当日日盘；若当日触发策略交叉，额外发送一条独立的 🚨 策略信号消息。 |
 | 工作日 20:02 | 夜盘开盘 | 取 20:00–20:05 的首个有效报价；归属下一交易日，周五晚归属下周一。 |
 
 源站无有效报价、不是常规交易日或完整日线尚未发布时，快报不会伪造价格。法定节假日最终以行情源的实际数据为准。
@@ -34,9 +34,9 @@ export GOLD_ADMIN_TOKEN='请替换为随机且足够长的令牌'
 # 测试机器人连接
 curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://127.0.0.1:5080/api/push/test
 
-# 手动发送三类行情快报
+# 手动发送开盘价、夜盘开盘价和“最新已发布日线”的模拟收盘快报
 curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://127.0.0.1:5080/api/push/opening
-curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://127.0.0.1:5080/api/push/closing
+curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" 'http://127.0.0.1:5080/api/push/closing?mode=latest'
 curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://127.0.0.1:5080/api/push/night-opening
 
 # 查看调度规则与当前市场时段；该接口不控制调度器
@@ -44,6 +44,15 @@ curl -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://127.0.0.1:5080/api/service/sta
 ```
 
 `POST /api/service/start` 和 `POST /api/service/stop` 保留为兼容路由，但始终返回 HTTP 410；请通过 systemd、supervisor 或容器编排管理独立调度进程。
+
+## 收盘策略信号
+
+收盘快报会以同一条已发布的官方日线计算 MA5/20、MA10/30、MACD、KDJ。若某策略当日产生
+买入或卖出交叉，会额外发送独立的 `🚨 黄金策略交易信号` 消息，使用醒目的标题和“收盘确认，请重点关注”标识，并列出策略名称、方向和 `1×` 至 `4×` 的多指标共振权重；没有交叉时不会产生策略消息。
+
+管理页的“模拟推送最新日线收盘”和 `POST /api/push/closing?mode=latest` 使用最新已发布日线，
+即使它不是今天的日线也可用于检查机器人内容；消息标题和正文会明确标注为模拟。定时器仍只在
+当日官方完整日线发布后发送正式收盘快报。
 
 ## 价格边界
 

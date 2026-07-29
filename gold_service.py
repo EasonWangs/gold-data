@@ -61,7 +61,21 @@ KDJ_SMOOTHING_PERIOD = 3
 MACD_FAST_PERIOD = 12
 MACD_SLOW_PERIOD = 26
 MACD_SIGNAL_PERIOD = 9
-API_VERSION = '2.1.0'
+SUPPORTED_BACKTEST_STRATEGIES = {
+    'ma5_20': {'label': 'MA5/20 交叉', 'basis': 'close', 'parameters': {'fast_period': 5, 'slow_period': 20}},
+    'ma10_30': {'label': 'MA10/30 交叉', 'basis': 'close', 'parameters': {'fast_period': 10, 'slow_period': 30}},
+    'macd': {'label': 'MACD DIF/DEA 交叉', 'basis': 'close', 'parameters': {'fast_period': 12, 'slow_period': 26, 'signal_period': 9}},
+    'kdj': {'label': 'KDJ K/D 交叉', 'basis': 'high-low-close', 'parameters': {'rsv_window': 9, 'k_smoothing_period': 3, 'd_smoothing_period': 3}},
+}
+DEFAULT_BACKTEST_INITIAL_CASH = 100_000.0
+DEFAULT_BACKTEST_ORDER_AMOUNT = 10_000.0
+DEFAULT_BACKTEST_START_DATE = datetime(2025, 1, 1).date()
+MIN_BACKTEST_INITIAL_CASH = 10_000.0
+BACKTEST_INITIAL_CASH_STEP = 10_000.0
+MIN_BACKTEST_ORDER_AMOUNT = 1_000.0
+BACKTEST_ORDER_AMOUNT_STEP = 1_000.0
+MAX_BACKTEST_CASH = 100_000_000.0
+API_VERSION = '2.3.0'
 DATA_SOURCE = '上海黄金交易所行情（经 AkShare 获取）'
 SGE_SESSION_SCHEDULE = (
     {'name': 'night', 'label': '夜盘', 'time': '20:00–次日 02:30'},
@@ -551,13 +565,13 @@ class GoldService:
         """推送夜盘首个有效报价（20:00–20:05）。"""
         return self._push_session_opening_price(clock_time(20), '夜盘')
 
-    def push_closing_price(self):
-        """推送收盘价格"""
-        if not self.is_trading_day():
+    def push_closing_price(self, simulation=False):
+        """Send a settlement message, or simulate it with the latest daily bar."""
+        if not simulation and not self.is_trading_day():
             logger.info("今日为周末，跳过收盘价格推送")
             return False, '今日非交易日，未发送收盘价格'
 
-        logger.info("开始推送收盘价格...")
+        logger.info("开始%s收盘价格推送...", '模拟' if simulation else '正式')
 
         # 获取历史数据并检查日期
         # Settlement must not rely on a 30-minute intraday cache: the source
@@ -573,7 +587,7 @@ class GoldService:
             current_date = market_now().date()
 
             # 判断最后一条是否是今天的数据
-            if record_date == current_date:
+            if record_date is not None and (record_date == current_date or simulation):
                 # 官方日线已提供完整交易日（含夜盘）的 OHLC，不能用跨零点的
                 # spot_quotations_sge 实时残片重新计算高低价。
                 hist_data = last_record
@@ -584,7 +598,10 @@ class GoldService:
                     prev_close = prev_data.get('close', 0)
                 else:
                     prev_close = 0
-                logger.info(f"使用今天的收盘数据: {record_date}")
+                if simulation and record_date != current_date:
+                    logger.info('模拟推送使用最新已发布日线: %s（当前日期 %s）', record_date, current_date)
+                else:
+                    logger.info(f"使用今天的收盘数据: {record_date}")
             else:
                 # 官方日线尚未更新时，实时行情会遗漏跨夜交易时段，不能据此拼接
                 # 当日 OHLC 或高低价；宁可拒绝发送，也不能发布错误的收盘区间。
@@ -612,7 +629,7 @@ class GoldService:
 
             # 准备消息数据
             message_data = {
-                'date': market_now().strftime('%Y-%m-%d'),
+                'date': record_date.isoformat(),
                 'time': market_now().strftime('%H:%M:%S'),
                 'symbol': 'Au99.99 (上海黄金交易所)',
                 'open_price': hist_data.get('open', 'N/A'),
@@ -623,14 +640,30 @@ class GoldService:
                 'trend_emoji': trend_emoji,
                 'change': change,
                 'change_percent': change_percent,
+                'simulation_note': (
+                    '> ⚠️ 此为手动模拟推送，展示最新已发布的官方日线。\n'
+                    if simulation else ''
+                ),
                 'link_url': self.link_url
             }
 
             message = MessageTemplate.format_closing_price_message(message_data)
-            sent = self.send_message(message, title="黄金收盘价格播报")
+            title = '黄金收盘价格模拟播报' if simulation else '黄金收盘价格播报'
+            sent = self.send_message(message, title=title)
             if sent:
                 self._record_successful_push()
-                return True, '收盘价格推送成功'
+                strategy_result = self._push_closing_strategy_signals(
+                    hist_data_full,
+                    record_date,
+                    close_price,
+                    simulation,
+                )
+                message = '收盘价格模拟推送成功' if simulation else '收盘价格推送成功'
+                if strategy_result is True:
+                    return True, f'{message}；策略信号推送成功'
+                if strategy_result is False:
+                    return True, f'{message}；策略信号推送失败'
+                return True, message
 
             logger.error('收盘价格推送未被钉钉接受')
             return False, '钉钉未接受收盘价格推送'
@@ -643,6 +676,44 @@ class GoldService:
             error_msg = MessageTemplate.format_error_message(error_data)
             self.send_message(error_msg, title="数据获取失败")
             return False, '无法获取收盘价格数据'
+
+    def _push_closing_strategy_signals(self, history_data, trading_date, close_price, simulation):
+        """Send an attention-grabbing, separate DingTalk message for close signals."""
+        try:
+            signals = collect_closing_strategy_signals(history_data, trading_date)
+        except Exception:
+            logger.exception('计算收盘策略信号失败，收盘行情快报已发送')
+            return False
+
+        if not signals:
+            return None
+
+        action_labels = {'buy': '买入', 'sell': '卖出'}
+        action_emojis = {'buy': '🟢', 'sell': '🔴'}
+        lines = []
+        for signal in signals:
+            lines.append(
+                f"{action_emojis[signal['action']]} **{signal['strategy_name']}**："
+                f"{action_labels[signal['action']]} · **{signal['signal_weight']}× 共振**"
+            )
+        message = MessageTemplate.format_strategy_signal_message({
+            'date': trading_date.isoformat(),
+            'close_price': float(close_price),
+            'signals': '\n\n'.join(lines),
+            'simulation_note': (
+                '> ⚠️ 此为手动模拟推送，展示最新已发布的官方日线。\n'
+                if simulation else ''
+            ),
+            'link_url': self.link_url,
+        })
+        title = '🚨 黄金策略信号（模拟）' if simulation else '🚨 黄金策略信号'
+        sent = self.send_message(message, title=title)
+        if sent:
+            self._record_successful_push()
+            return True
+
+        logger.error('钉钉未接受收盘策略信号推送')
+        return False
 
     def test_push(self):
         """测试推送功能"""
@@ -750,6 +821,16 @@ def index():
     """后台配置页。"""
     from flask import render_template
     return render_template('index.html')
+
+
+@app.route('/backtest')
+def backtest_page():
+    """Independent server-side strategy backtest page."""
+    from flask import render_template
+    return render_template(
+        'backtest.html',
+        default_end_date=market_now().date().isoformat(),
+    )
 
 def serialize_sge_records(data, historical=False, market_time=None):
     """Convert SGE data frames to JSON-safe records.
@@ -1179,6 +1260,391 @@ def macd_indicator_response(symbol, metal_name, unit):
         }), 500
 
 
+def _parse_backtest_date(name):
+    """Parse an optional ISO date query parameter into a calendar date."""
+    value = request.args.get(name)
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, '%Y-%m-%d').date()
+    except ValueError:
+        raise ValueError(f'{name} 必须为 YYYY-MM-DD 日期')
+
+
+def _parse_backtest_money(name, default, minimum, step):
+    """Parse money using the same lower bound and increment as the UI."""
+    value = request.args.get(name)
+    if value is None or value == '':
+        return default
+    try:
+        amount = float(value)
+    except ValueError:
+        raise ValueError(f'{name} 必须为正数')
+    if not math.isfinite(amount) or amount < minimum or amount > MAX_BACKTEST_CASH:
+        raise ValueError(f'{name} 必须在 {minimum:,.0f} 到 {MAX_BACKTEST_CASH:,.0f} 之间')
+    if not math.isclose(amount / step, round(amount / step), rel_tol=0, abs_tol=1e-9):
+        raise ValueError(f'{name} 必须为 {step:,.0f} 的整数倍')
+    return round(amount, 2)
+
+
+def parse_backtest_parameters():
+    """Validate public backtest query parameters without silent coercion."""
+    strategy = request.args.get('strategy', 'ma5_20')
+    if strategy not in SUPPORTED_BACKTEST_STRATEGIES:
+        supported = ', '.join(SUPPORTED_BACKTEST_STRATEGIES)
+        raise ValueError(f'strategy 仅支持 {supported}')
+
+    start_date = _parse_backtest_date('start') or DEFAULT_BACKTEST_START_DATE
+    end_date = _parse_backtest_date('end') or market_now().date()
+    if start_date and end_date and start_date > end_date:
+        raise ValueError('start 不能晚于 end')
+
+    initial_cash = _parse_backtest_money(
+        'initial_cash',
+        DEFAULT_BACKTEST_INITIAL_CASH,
+        MIN_BACKTEST_INITIAL_CASH,
+        BACKTEST_INITIAL_CASH_STEP,
+    )
+    order_amount = _parse_backtest_money(
+        'order_amount',
+        DEFAULT_BACKTEST_ORDER_AMOUNT,
+        MIN_BACKTEST_ORDER_AMOUNT,
+        BACKTEST_ORDER_AMOUNT_STEP,
+    )
+    if order_amount > initial_cash:
+        raise ValueError('order_amount 不能高于 initial_cash')
+
+    return {
+        'strategy': strategy,
+        'start_date': start_date,
+        'end_date': end_date,
+        'initial_cash': initial_cash,
+        'order_amount': order_amount,
+    }
+
+
+def build_backtest_indicators(history_data):
+    """Build one aligned daily frame for all server-side strategy signals."""
+    indicators = clean_historical_ohlc_data(history_data)
+    if indicators.empty:
+        return indicators
+
+    for window in SUPPORTED_SMA_WINDOWS:
+        indicators[f'ma{window}'] = indicators['close'].rolling(
+            window=window,
+            min_periods=window,
+        ).mean()
+
+    macd = calculate_macd_indicators(indicators)
+    kdj = calculate_kdj_indicators(indicators)
+    indicators['dif'] = macd['dif'].to_numpy()
+    indicators['dea'] = macd['dea'].to_numpy()
+    indicators['k'] = kdj['k'].to_numpy()
+    indicators['d'] = kdj['d'].to_numpy()
+    return indicators
+
+
+def _backtest_resonance(current, action, primary_strategy):
+    """Return the front-end-aligned 1x–4x signal weight and confirmations."""
+    expected_above = action == 'buy'
+    confirmations = []
+
+    def is_above(left, right):
+        if pd.isna(left) or pd.isna(right):
+            return False
+        return left > right if expected_above else left < right
+
+    if primary_strategy != 'ma5_20' and is_above(current['ma5'], current['ma20']):
+        confirmations.append('ma5_20')
+    if primary_strategy != 'ma10_30' and is_above(current['ma10'], current['ma30']):
+        confirmations.append('ma10_30')
+    if primary_strategy != 'macd':
+        dif, dea = current['dif'], current['dea']
+        macd_confirmed = (
+            not pd.isna(dif) and not pd.isna(dea)
+            and (dif > dea and dif > 0 if expected_above else dif < dea)
+        )
+        if macd_confirmed:
+            confirmations.append('macd')
+    if primary_strategy != 'kdj' and is_above(current['k'], current['d']):
+        confirmations.append('kdj')
+
+    return 1 + len(confirmations), confirmations
+
+
+def _backtest_signal(indicators, index, strategy):
+    """Return a confirmed crossover signal for a row, or ``None``."""
+    if index == 0:
+        return None
+    current = indicators.iloc[index]
+    previous = indicators.iloc[index - 1]
+
+    if strategy in ('ma5_20', 'ma10_30'):
+        fast_period, slow_period = (
+            (5, 20) if strategy == 'ma5_20' else (10, 30)
+        )
+        fast_key, slow_key = f'ma{fast_period}', f'ma{slow_period}'
+        values = (previous[fast_key], previous[slow_key], current[fast_key], current[slow_key])
+        if any(pd.isna(value) for value in values):
+            return None
+        previous_difference = previous[fast_key] - previous[slow_key]
+        current_difference = current[fast_key] - current[slow_key]
+        if previous_difference <= 0 and current_difference > 0:
+            action, reason = 'buy', f'MA{fast_period} 上穿 MA{slow_period}'
+        elif previous_difference >= 0 and current_difference < 0:
+            action, reason = 'sell', f'MA{fast_period} 下穿 MA{slow_period}'
+        else:
+            return None
+        signal_indicators = {fast_key: current[fast_key], slow_key: current[slow_key]}
+    elif strategy == 'macd':
+        values = (previous['dif'], previous['dea'], current['dif'], current['dea'])
+        if any(pd.isna(value) for value in values):
+            return None
+        if (previous['dif'] <= previous['dea'] and current['dif'] > current['dea']
+                and current['dif'] > 0 and current['dea'] > 0):
+            action, reason = 'buy', 'DIF 上穿 DEA（零轴上方）'
+        elif previous['dif'] >= previous['dea'] and current['dif'] < current['dea']:
+            action, reason = 'sell', 'DIF 下穿 DEA'
+        else:
+            return None
+        signal_indicators = {'dif': current['dif'], 'dea': current['dea']}
+    else:
+        values = (previous['k'], previous['d'], current['k'], current['d'])
+        if any(pd.isna(value) for value in values):
+            return None
+        if previous['k'] <= previous['d'] and current['k'] > current['d']:
+            action, reason = 'buy', 'K 上穿 D'
+        elif previous['k'] >= previous['d'] and current['k'] < current['d']:
+            action, reason = 'sell', 'K 下穿 D'
+        else:
+            return None
+        signal_indicators = {'k': current['k'], 'd': current['d']}
+
+    signal_weight, confirmations = _backtest_resonance(current, action, strategy)
+    return {
+        'action': action,
+        'reason': reason,
+        'indicators': signal_indicators,
+        'signal_weight': signal_weight,
+        'confirmations': confirmations,
+    }
+
+
+def _serialise_backtest_indicators(values):
+    return {
+        name: round(float(value), 4)
+        for name, value in values.items()
+    }
+
+
+def collect_closing_strategy_signals(history_data, trading_date):
+    """Collect all crossover signals for one published daily bar.
+
+    The closing push uses the official daily bar that it is about to report,
+    so strategy signals and the published close always refer to the same SGE
+    trading day.  A primary crossover can yield one result for each strategy.
+    """
+    indicators = build_backtest_indicators(history_data)
+    if indicators.empty:
+        return []
+
+    target_date = normalize_history_date(trading_date)
+    matches = indicators.index[indicators['date'].dt.date == target_date]
+    if matches.empty:
+        return []
+
+    index = indicators.index.get_loc(matches[-1])
+    signals = []
+    for strategy, definition in SUPPORTED_BACKTEST_STRATEGIES.items():
+        signal = _backtest_signal(indicators, index, strategy)
+        if signal is None:
+            continue
+        signals.append({
+            'strategy': strategy,
+            'strategy_name': definition['label'],
+            'action': signal['action'],
+            'signal_weight': signal['signal_weight'],
+            'confirmations': signal['confirmations'],
+        })
+    return signals
+
+
+def run_strategy_backtest(history_data, strategy='ma5_20', start_date=None, end_date=None,
+                          initial_cash=DEFAULT_BACKTEST_INITIAL_CASH,
+                          order_amount=DEFAULT_BACKTEST_ORDER_AMOUNT):
+    """Simulate resonance-weighted daily-close crossover trades from SGE bars.
+
+    This is an auditable research simulation, not an order-execution engine.
+    Indicators are calculated from the full clean history before the requested
+    period is selected, so a short request window still receives valid MA30,
+    MACD, and KDJ warm-up data.
+    """
+    if strategy not in SUPPORTED_BACKTEST_STRATEGIES:
+        raise ValueError(f'未知策略: {strategy}')
+
+    indicators = build_backtest_indicators(history_data)
+    if indicators.empty:
+        raise ValueError('没有可用于回测的完整日线数据')
+
+    selected = indicators.copy()
+    if start_date:
+        selected = selected[selected['date'].dt.date >= start_date]
+    if end_date:
+        selected = selected[selected['date'].dt.date <= end_date]
+    selected = selected.reset_index(drop=True)
+    if selected.empty:
+        raise ValueError('所选日期区间没有可用日线数据')
+
+    cash = float(initial_cash)
+    position = 0.0
+    position_cost = 0.0
+    trades = []
+    latest_signal = None
+    first_date = selected.iloc[0]['date']
+    last_date = selected.iloc[-1]['date']
+
+    # The selection must retain its predecessor from the complete history so
+    # a cross on the first requested date is not accidentally hidden.
+    selected_dates = set(selected['date'])
+    for index, row in indicators.iterrows():
+        if row['date'] not in selected_dates:
+            continue
+        signal = _backtest_signal(indicators, index, strategy)
+        if signal is None:
+            continue
+
+        price = float(row['close'])
+        date_text = row['date'].strftime('%Y-%m-%d')
+        base_order_amount = float(order_amount)
+        requested_amount = base_order_amount * signal['signal_weight']
+        # Keep buy orders atomic: a short cash balance is an auditable failed
+        # signal, never an implicit smaller purchase.
+        amount = requested_amount if signal['action'] == 'buy' else min(requested_amount, position * price)
+        execution_status = 'executed'
+        quantity = 0.0
+        reason = signal['reason']
+        if signal['action'] == 'buy' and cash >= amount:
+            quantity = amount / price
+            cash -= amount
+            position += quantity
+            position_cost += amount
+        elif signal['action'] == 'sell' and amount > 0 and position > 0:
+            quantity = amount / price
+            quantity = min(quantity, position)
+            amount = quantity * price
+            cost = position_cost * quantity / position
+            cash += amount
+            position -= quantity
+            position_cost -= cost
+        else:
+            execution_status = 'skipped'
+            reason = f'{reason}；' + ('可用资金不足' if signal['action'] == 'buy' else '当前无持仓')
+
+        trade = {
+            'date': date_text,
+            'action': signal['action'],
+            'execution_status': execution_status,
+            'price': round(price, 2),
+            'amount': round(amount, 2),
+            'base_order_amount': round(base_order_amount, 2),
+            'signal_weight': signal['signal_weight'],
+            'confirmations': signal['confirmations'],
+            'quantity': round(quantity, 6),
+            'position_after': round(position, 6),
+            'cash_after': round(cash, 2),
+            'reason': reason,
+            'indicators': _serialise_backtest_indicators(signal['indicators']),
+        }
+        trades.append(trade)
+        latest_signal = {
+            key: trade[key]
+            for key in (
+                'date', 'action', 'execution_status', 'reason', 'indicators',
+                'signal_weight', 'confirmations',
+            )
+        }
+
+    latest_price = float(selected.iloc[-1]['close'])
+    position_value = position * latest_price
+    total_value = cash + position_value
+    profit = total_value - initial_cash
+    elapsed_days = max((last_date - first_date).days, 0)
+    annualized_return = 0.0
+    if elapsed_days > 0 and total_value > 0:
+        annualized_return = (math.pow(total_value / initial_cash, 365.25 / elapsed_days) - 1) * 100
+    if latest_signal is None or latest_signal['date'] != last_date.strftime('%Y-%m-%d'):
+        latest_signal = {
+            'date': last_date.strftime('%Y-%m-%d'),
+            'action': 'hold',
+            'execution_status': 'not_triggered',
+            'reason': '最新交易日未出现该策略的交叉信号',
+            'indicators': {},
+            'signal_weight': 0,
+            'confirmations': [],
+        }
+
+    executed_trades = [trade for trade in trades if trade['execution_status'] == 'executed']
+    return {
+        'strategy': strategy,
+        'strategy_name': SUPPORTED_BACKTEST_STRATEGIES[strategy]['label'],
+        'parameters': SUPPORTED_BACKTEST_STRATEGIES[strategy]['parameters'],
+        'assumptions': {
+            'execution_price': '信号日收盘价',
+            'order_amount': round(float(order_amount), 2),
+            'resonance': {
+                'base_weight': 1,
+                'maximum_weight': 4,
+                'description': '主交叉触发为 1x，另外三个同向指标每项增加 1x。',
+            },
+            'fees_included': False,
+            'slippage_included': False,
+            'note': '回测仅用于历史研究，不构成投资建议或实际交易指令。',
+        },
+        'period': {'start': first_date.strftime('%Y-%m-%d'), 'end': last_date.strftime('%Y-%m-%d'), 'trading_days': len(selected)},
+        'summary': {
+            'initial_cash': round(float(initial_cash), 2),
+            'cash': round(cash, 2),
+            'position': round(position, 6),
+            'position_value': round(position_value, 2),
+            'latest_price': round(latest_price, 2),
+            'total_value': round(total_value, 2),
+            'profit': round(profit, 2),
+            'return_rate': round(profit / initial_cash * 100, 2),
+            'annualized_return': round(annualized_return, 2),
+            'executed_trade_count': len(executed_trades),
+            'skipped_signal_count': len(trades) - len(executed_trades),
+        },
+        'latest_signal': latest_signal,
+        'trades': trades,
+    }
+
+
+def backtest_response(symbol, metal_name, unit):
+    """Build the public server-side strategy backtest response."""
+    try:
+        options = parse_backtest_parameters()
+    except ValueError as error:
+        return jsonify({'status': 'error', 'message': str(error), 'timestamp': market_timestamp()}), 400
+
+    try:
+        history_data = gold_service.get_historical_sge_price(symbol, days=None)
+        result = run_strategy_backtest(history_data, **options)
+        return jsonify({
+            'status': 'success',
+            'timestamp': market_timestamp(),
+            'symbol': symbol,
+            'unit': unit,
+            'data_source': DATA_SOURCE,
+            'market': get_sge_session_status(),
+            'result': result,
+        })
+    except ValueError as error:
+        return jsonify({'status': 'error', 'message': str(error), 'timestamp': market_timestamp()}), 422
+    except Exception as error:
+        logger.exception('计算 %s 策略回测失败', metal_name)
+        return jsonify({'status': 'error', 'message': str(error), 'timestamp': market_timestamp()}), 500
+
+
 def realtime_sge_response(symbol, metal_name):
     """Build a realtime SGE API response for a metal symbol."""
     try:
@@ -1301,6 +1767,12 @@ def api_gold_macd_indicators():
     return macd_indicator_response(GOLD_SYMBOL, '黄金', GOLD_UNIT)
 
 
+@app.route('/api/gold/backtest', methods=['GET'])
+def api_gold_backtest():
+    """Server-side daily-bar strategy backtest for Au99.99."""
+    return backtest_response(GOLD_SYMBOL, '黄金', GOLD_UNIT)
+
+
 @app.route('/api/silver/spot_quotations_sge', methods=['GET'])
 def api_realtime_silver_price():
     """实时白银价格 API 接口。"""
@@ -1327,6 +1799,7 @@ def api_gold_info():
             "/api/gold/indicators/sma": "获取黄金日线收盘价 SMA 指标",
             "/api/gold/indicators/kdj": "获取黄金日线 KDJ 指标",
             "/api/gold/indicators/macd": "获取黄金日线 MACD（DIF、DEA）指标",
+            "/api/gold/backtest": "运行黄金日线策略回测（MA、MACD、KDJ）",
             "/api/silver/spot_quotations_sge": "获取实时白银价格",
             "/api/silver/spot_hist_sge": "获取历史白银价格",
             "/api/market/session": "获取上金所常规交易时段与当前交易日归属",
@@ -1426,9 +1899,10 @@ def api_push_opening():
 @app.route('/api/push/closing', methods=['POST'])
 @require_admin_token
 def api_push_closing():
-    """推送收盘价"""
+    """Send a confirmed close, or simulate the latest published daily close."""
     try:
-        success, message = gold_service.push_closing_price()
+        simulation = request.args.get('mode') == 'latest'
+        success, message = gold_service.push_closing_price(simulation=simulation)
         return push_response(success, message)
 
     except Exception as e:
@@ -1465,11 +1939,13 @@ def api_info():
         'features': {
             'gold_api': '上金所 Au99.99 实时分时与交易日日线',
             'silver_api': '上金所 Ag99.99 实时分时与交易日日线',
+            'strategy_backtest': '后端日线策略回测与最新信号输出',
             'dingtalk_push': '日盘、日线收盘、夜盘三个时点的钉钉快报',
             'web_interface': 'Web管理界面'
         },
         'endpoints': {
             '/': 'Web管理界面',
+            '/backtest': '后端策略回测页面',
             '/api/gold/*': '黄金价格API',
             '/api/silver/*': '白银价格API',
             '/api/market/session': '交易时段与交易日归属',

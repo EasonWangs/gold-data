@@ -36,6 +36,36 @@ def realtime_quotes(prices):
     })
 
 
+def strategy_history():
+    closes = [100, 99, 98, 97, 96, 97, 98, 99, 100, 101, 102, 101, 100, 99, 98, 97,
+              96, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 103, 102, 101, 100, 99,
+              98, 97, 96, 97, 98, 99, 100, 101]
+    return pd.DataFrame({
+        'date': pd.bdate_range('2026-01-01', periods=len(closes)),
+        'high': [value + 2 for value in closes],
+        'low': [value - 2 for value in closes],
+        'close': closes,
+    })
+
+
+def resonance_indicator_frame():
+    """Two aligned rows where every strategy has a 4x long resonance signal."""
+    return pd.DataFrame({
+        'date': pd.bdate_range('2026-06-01', periods=2),
+        'high': [102, 112],
+        'low': [98, 108],
+        'close': [100, 110],
+        'ma5': [100, 105],
+        'ma10': [100, 104],
+        'ma20': [100, 102],
+        'ma30': [100, 102],
+        'dif': [0.1, 1.0],
+        'dea': [0.2, 0.5],
+        'k': [50, 60],
+        'd': [50, 55],
+    })
+
+
 class SmaIndicatorApiTests(unittest.TestCase):
     def setUp(self):
         self.client = gold_service.app.test_client()
@@ -93,6 +123,182 @@ class SmaIndicatorApiTests(unittest.TestCase):
         self.assertEqual(body['status'], 'success')
         self.assertEqual(body['market']['timezone'], 'Asia/Shanghai')
         self.assertIn('夜盘', body['market']['daily_bar_note'])
+
+    def test_server_side_ma_backtest_executes_crosses_and_returns_latest_signal(self):
+        result = gold_service.run_strategy_backtest(strategy_history(), strategy='ma5_20')
+
+        self.assertEqual(result['strategy'], 'ma5_20')
+        self.assertEqual(result['summary']['executed_trade_count'], 2)
+        self.assertEqual(
+            [(trade['action'], trade['execution_status']) for trade in result['trades']],
+            [('buy', 'executed'), ('sell', 'executed')],
+        )
+        self.assertEqual(result['latest_signal']['action'], 'hold')
+        self.assertEqual(result['assumptions']['execution_price'], '信号日收盘价')
+
+    def test_backtest_marks_unaffordable_buy_as_skipped_instead_of_partially_buying(self):
+        result = gold_service.run_strategy_backtest(
+            strategy_history(),
+            strategy='ma5_20',
+            initial_cash=5_000,
+            order_amount=10_000,
+        )
+
+        buy = next(trade for trade in result['trades'] if trade['action'] == 'buy')
+        self.assertEqual(buy['execution_status'], 'skipped')
+        self.assertEqual(buy['amount'], buy['base_order_amount'] * buy['signal_weight'])
+        self.assertEqual(buy['quantity'], 0.0)
+        self.assertEqual(buy['cash_after'], 5_000.0)
+        self.assertIn('可用资金不足', buy['reason'])
+
+    def test_all_backtest_strategies_use_other_indicators_as_resonance_weight(self):
+        frame = resonance_indicator_frame()
+        expected_confirmations = {
+            'ma5_20': {'ma10_30', 'macd', 'kdj'},
+            'ma10_30': {'ma5_20', 'macd', 'kdj'},
+            'macd': {'ma5_20', 'ma10_30', 'kdj'},
+            'kdj': {'ma5_20', 'ma10_30', 'macd'},
+        }
+
+        with patch.object(gold_service, 'build_backtest_indicators', return_value=frame):
+            for strategy, confirmations in expected_confirmations.items():
+                with self.subTest(strategy=strategy):
+                    result = gold_service.run_strategy_backtest(
+                        frame,
+                        strategy=strategy,
+                        initial_cash=100_000,
+                        order_amount=10_000,
+                    )
+
+                    trade = result['trades'][0]
+                    self.assertEqual(trade['execution_status'], 'executed')
+                    self.assertEqual(trade['signal_weight'], 4)
+                    self.assertEqual(trade['amount'], 40_000.0)
+                    self.assertEqual(set(trade['confirmations']), confirmations)
+                    self.assertEqual(result['latest_signal']['signal_weight'], 4)
+
+    def test_macd_buy_requires_dif_and_dea_above_zero_axis(self):
+        frame = resonance_indicator_frame()
+        frame.loc[1, ['dif', 'dea']] = [0.1, -0.1]
+
+        self.assertIsNone(gold_service._backtest_signal(frame, 1, 'macd'))
+
+    def test_closing_strategy_signals_collect_all_triggered_strategies(self):
+        frame = resonance_indicator_frame()
+        with patch.object(gold_service, 'build_backtest_indicators', return_value=frame):
+            signals = gold_service.collect_closing_strategy_signals(frame, frame.iloc[-1]['date'])
+
+        self.assertEqual([signal['strategy'] for signal in signals], ['ma5_20', 'ma10_30', 'macd', 'kdj'])
+        self.assertTrue(all(signal['action'] == 'buy' for signal in signals))
+        self.assertTrue(all(signal['signal_weight'] == 4 for signal in signals))
+
+    def test_closing_push_sends_strategy_action_and_weight_as_separate_alert(self):
+        service = gold_service.gold_service
+        now = datetime(2026, 6, 2, 16, 2, tzinfo=gold_service.MARKET_TIMEZONE)
+        history = pd.DataFrame({
+            'date': ['2026-06-01', '2026-06-02'],
+            'open': [100.0, 101.0],
+            'high': [102.0, 103.0],
+            'low': [99.0, 100.0],
+            'close': [101.0, 102.0],
+        })
+        signals = [{'strategy_name': 'MA5/20 交叉', 'action': 'buy', 'signal_weight': 3}]
+        with (
+            patch.object(service, 'is_trading_day', return_value=True),
+            patch.object(service, 'get_historical_gold_price', return_value=history),
+            patch.object(service, 'send_message', return_value=True) as sender,
+            patch.object(gold_service, 'collect_closing_strategy_signals', return_value=signals),
+            patch.object(gold_service, 'market_now', return_value=now),
+        ):
+            success, _ = service.push_closing_price()
+
+        self.assertTrue(success)
+        self.assertEqual(sender.call_count, 2)
+        closing_message = sender.call_args_list[0].args[0]
+        strategy_message = sender.call_args_list[1].args[0]
+        self.assertNotIn('MA5/20 交叉', closing_message)
+        self.assertIn('🚨 黄金策略交易信号', strategy_message)
+        self.assertIn('MA5/20 交叉', strategy_message)
+        self.assertIn('买入', strategy_message)
+        self.assertIn('3× 共振', strategy_message)
+        self.assertEqual(sender.call_args_list[1].kwargs['title'], '🚨 黄金策略信号')
+
+    def test_simulated_closing_push_uses_latest_published_daily_bar(self):
+        service = gold_service.gold_service
+        now = datetime(2026, 6, 3, 16, 2, tzinfo=gold_service.MARKET_TIMEZONE)
+        history = pd.DataFrame({
+            'date': ['2026-06-01', '2026-06-02'],
+            'open': [100.0, 101.0],
+            'high': [102.0, 103.0],
+            'low': [99.0, 100.0],
+            'close': [101.0, 102.0],
+        })
+        with (
+            patch.object(service, 'get_historical_gold_price', return_value=history),
+            patch.object(service, 'send_message', return_value=True) as sender,
+            patch.object(gold_service, 'collect_closing_strategy_signals', return_value=[]),
+            patch.object(gold_service, 'market_now', return_value=now),
+        ):
+            success, message = service.push_closing_price(simulation=True)
+
+        self.assertTrue(success)
+        self.assertEqual(message, '收盘价格模拟推送成功')
+        self.assertEqual(sender.call_args.kwargs['title'], '黄金收盘价格模拟播报')
+        self.assertIn('2026-06-02', sender.call_args.args[0])
+        self.assertIn('手动模拟推送', sender.call_args.args[0])
+
+    def test_backtest_api_uses_full_history_and_exposes_dingtalk_reusable_latest_signal(self):
+        history = strategy_history()
+        with patch.object(gold_service.gold_service, 'get_historical_sge_price', return_value=history) as loader:
+            response = self.client.get('/api/gold/backtest?strategy=kdj&start=2026-01-20&initial_cash=20000&order_amount=5000')
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(loader.call_args.args, (gold_service.GOLD_SYMBOL,))
+        self.assertEqual(loader.call_args.kwargs, {'days': None})
+        self.assertEqual(body['result']['strategy'], 'kdj')
+        self.assertEqual(body['result']['summary']['initial_cash'], 20000.0)
+        self.assertIn('action', body['result']['latest_signal'])
+        self.assertIn('reason', body['result']['latest_signal'])
+        self.assertIn('signal_weight', body['result']['latest_signal'])
+        self.assertIn('confirmations', body['result']['latest_signal'])
+
+    def test_backtest_api_rejects_invalid_strategy_dates_and_money(self):
+        for query in (
+            'strategy=unknown',
+            'start=2026-03-01&end=2026-02-01',
+            'start=bad-date',
+            'initial_cash=0',
+            'order_amount=bad',
+            'initial_cash=10000&order_amount=10001',
+            'initial_cash=100001',
+            'order_amount=10001',
+        ):
+            with self.subTest(query=query):
+                response = self.client.get(f'/api/gold/backtest?{query}')
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.get_json()['status'], 'error')
+
+    def test_backtest_defaults_to_2025_start_current_date_and_standard_cash(self):
+        current = datetime(2026, 7, 29, 14, 0, tzinfo=gold_service.MARKET_TIMEZONE)
+        with (
+            self.client.application.test_request_context('/api/gold/backtest'),
+            patch.object(gold_service, 'market_now', return_value=current),
+        ):
+            options = gold_service.parse_backtest_parameters()
+
+        self.assertEqual(options['start_date'].isoformat(), '2025-01-01')
+        self.assertEqual(options['end_date'].isoformat(), '2026-07-29')
+        self.assertEqual(options['initial_cash'], 100000.0)
+        self.assertEqual(options['order_amount'], 10000.0)
+
+    def test_backtest_page_is_served_independently_from_the_main_frontend(self):
+        response = self.client.get('/backtest')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('后端策略回测', response.get_data(as_text=True))
+        self.assertIn('static/js/backtest.js', response.get_data(as_text=True))
+        self.assertIn('value="2025-01-01"', response.get_data(as_text=True))
 
     def test_realtime_quotes_from_a_stale_weekend_feed_keep_their_trading_day(self):
         quotes = pd.DataFrame({'时间': [time(9), time(11), time(1)], '现价': [890, 891, 892]})

@@ -391,4 +391,4 @@ python gold_service.py --scheduler-only
 
 **🏅 数据来源**: 上海黄金交易所 Au99.99 / Ag99.99（经 AkShare 获取）
 **🔧 技术栈**: Flask + akshare + 钉钉API
-**📅 版本**: 2.1.0 (2026-07-29)
+**📅 版本**: 2.3.0 (2026-07-29)

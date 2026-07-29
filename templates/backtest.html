@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>黄金策略回测</title>
+    <link rel="stylesheet" href="[[ url_for('static', filename='css/style.css') ]]">
+    <script defer src="[[ url_for('static', filename='js/backtest.js') ]]"></script>
+</head>
+<body>
+    <main class="container backtest-container">
+        <header class="header backtest-header">
+            <a class="header-link" href="/">← 返回行情服务</a>
+            <h1>📐 后端策略回测</h1>
+            <p>Au99.99 日线 · 服务端计算 · 可复用的策略信号结果</p>
+        </header>
+
+        <section class="tab-content">
+            <div class="backtest-notice">
+                指标先用完整历史日线预热，再按所选区间模拟。成交价为信号日收盘价，未计手续费与滑点；结果仅供历史研究，不构成投资建议。
+            </div>
+
+            <form id="backtest-form" class="card backtest-form">
+                <div class="grid">
+                    <label>策略
+                        <select id="strategy" name="strategy" class="form-control">
+                            <option value="ma5_20">MA5 / MA20 交叉</option>
+                            <option value="ma10_30">MA10 / MA30 交叉</option>
+                            <option value="macd">MACD DIF / DEA 交叉</option>
+                            <option value="kdj">KDJ K / D 交叉</option>
+                        </select>
+                    </label>
+                    <label>开始日期（可选）
+                        <input id="start" name="start" type="date" class="form-control" value="2025-01-01">
+                    </label>
+                    <label>结束日期（可选）
+                        <input id="end" name="end" type="date" class="form-control" value="[[ default_end_date ]]">
+                    </label>
+                    <label>初始资金（元）
+                        <input id="initial-cash" name="initial_cash" type="number" class="form-control" min="10000" max="100000000" step="10000" value="100000" required>
+                    </label>
+                    <label>基础单笔金额（元）
+                        <input id="order-amount" name="order_amount" type="number" class="form-control" min="1000" max="100000000" step="1000" value="10000" required>
+                    </label>
+                </div>
+                <button class="btn" type="submit">运行服务端回测</button>
+            </form>
+
+            <p id="backtest-loading" class="loading" hidden>正在计算完整日线与策略信号…</p>
+            <p id="backtest-error" class="error" hidden></p>
+
+            <section id="backtest-result" hidden>
+                <div class="backtest-title-row">
+                    <div>
+                        <span class="backtest-kicker">SERVER-SIDE SIMULATION</span>
+                        <h2 id="strategy-name">—</h2>
+                        <p id="backtest-period">—</p>
+                    </div>
+                    <div id="latest-signal" class="signal-card">—</div>
+                </div>
+
+                <div class="grid metric-grid">
+                    <article class="card metric-card"><span>期末总资产</span><strong id="total-value">—</strong><p id="total-return">—</p></article>
+                    <article class="card metric-card"><span>累计盈亏</span><strong id="profit">—</strong><p id="annualized-return">—</p></article>
+                    <article class="card metric-card"><span>可用资金</span><strong id="cash">—</strong><p id="position">—</p></article>
+                    <article class="card metric-card"><span>已执行成交</span><strong id="trade-count">—</strong><p id="skipped-count">—</p></article>
+                </div>
+
+                <article class="card">
+                    <h3>交易流水</h3>
+                    <p class="backtest-caption">主交叉信号按基础金额的 1 倍成交；其余三个指标同向确认时每项加 1 倍，最高 4 倍。现金不足时整笔记为“跳过”，便于后续钉钉通知和审计。</p>
+                    <div class="table-scroll">
+                        <table class="table">
+                            <thead><tr><th>日期</th><th>信号</th><th>状态</th><th>权重</th><th>成交价</th><th>金额</th><th>数量（克）</th><th>原因</th></tr></thead>
+                            <tbody id="trades-body"></tbody>
+                        </table>
+                    </div>
+                </article>
+            </section>
+        </section>
+    </main>
+</body>
+</html>

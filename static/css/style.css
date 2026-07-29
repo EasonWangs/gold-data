@@ -39,6 +39,19 @@ body {
     opacity: 0.9;
 }
 
+.header-link {
+    display: inline-block;
+    color: inherit;
+    margin-bottom: 18px;
+    opacity: 0.9;
+    text-decoration: none;
+}
+
+.header-link:hover {
+    opacity: 1;
+    text-decoration: underline;
+}
+
 .tabs {
     display: flex;
     background: #f8f9fa;
@@ -220,6 +233,143 @@ body {
     padding: 15px;
     border-radius: 6px;
     margin: 10px 0;
+}
+
+.backtest-container {
+    max-width: 1280px;
+}
+
+.backtest-notice {
+    background: #eef2ff;
+    border-left: 4px solid #667eea;
+    border-radius: 6px;
+    color: #334155;
+    line-height: 1.7;
+    margin-bottom: 20px;
+    padding: 14px 16px;
+}
+
+.backtest-form label {
+    color: #475569;
+    display: flex;
+    flex-direction: column;
+    font-weight: 600;
+    gap: 7px;
+}
+
+.backtest-form .form-control {
+    margin-right: 0;
+    width: 100%;
+}
+
+.backtest-title-row {
+    align-items: start;
+    display: flex;
+    gap: 20px;
+    justify-content: space-between;
+    margin: 28px 0 18px;
+}
+
+.backtest-title-row h2 {
+    color: #1e293b;
+    margin: 4px 0 6px;
+}
+
+.backtest-title-row p,
+.backtest-caption,
+.metric-card p {
+    color: #64748b;
+    line-height: 1.55;
+}
+
+.backtest-kicker {
+    color: #667eea;
+    font-size: .76rem;
+    font-weight: 700;
+    letter-spacing: .08em;
+}
+
+.signal-card {
+    background: #18223b;
+    border-radius: 10px;
+    color: #f8fafc;
+    min-width: 260px;
+    padding: 16px;
+}
+
+.signal-card span {
+    color: #cbd5e1;
+    display: block;
+    font-size: .78rem;
+}
+
+.signal-card strong {
+    display: block;
+    font-size: 1.45rem;
+    margin: 6px 0;
+    text-transform: uppercase;
+}
+
+.signal-card p {
+    color: #e2e8f0;
+    font-size: .88rem;
+    line-height: 1.45;
+}
+
+.metric-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.metric-card {
+    margin: 0;
+}
+
+.metric-card span {
+    color: #64748b;
+    font-size: .9rem;
+}
+
+.metric-card strong {
+    color: #1e293b;
+    display: block;
+    font-size: 1.45rem;
+    margin: 8px 0;
+}
+
+.table-scroll {
+    overflow-x: auto;
+}
+
+.trade-action {
+    border-radius: 999px;
+    color: #fff;
+    display: inline-block;
+    font-size: .78rem;
+    font-weight: 700;
+    padding: 4px 9px;
+    text-transform: uppercase;
+}
+
+.trade-action.buy {
+    background: #16a34a;
+}
+
+.trade-action.sell {
+    background: #dc2626;
+}
+
+@media (max-width: 760px) {
+    .backtest-title-row {
+        flex-direction: column;
+    }
+
+    .signal-card {
+        min-width: 100%;
+    }
+
+    .metric-grid {
+        grid-template-columns: 1fr 1fr;
+    }
 }
 
 .fade-enter-active,

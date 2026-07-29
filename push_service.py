@@ -211,7 +211,25 @@ class MessageTemplate:
 
 **{trend_emoji} 涨跌额:** {change:.2f} 元/克 ({change_percent:.2f}%)
 
+{simulation_note}
 > 日线高低开收包含此前夜盘与当日日盘；并非银行积存金报价。
+
+🔗 [查看详细数据]({link_url})"""
+
+    STRATEGY_SIGNAL_TEMPLATE = """# 🚨 黄金策略交易信号
+
+## ⚠️ 收盘确认，请重点关注
+
+**📅 交易日:** {date}
+
+**💰 确认收盘价:** {close_price:.2f} 元/克
+
+---
+
+{signals}
+
+{simulation_note}
+> 策略信号基于上金所 Au99.99 日线计算，仅供研究，不构成投资建议或实际交易指令。
 
 🔗 [查看详细数据]({link_url})"""
 
@@ -237,6 +255,11 @@ class MessageTemplate:
     def format_closing_price_message(cls, data: Dict[str, Any]) -> str:
         """格式化收盘价消息"""
         return cls.CLOSING_PRICE_TEMPLATE.format(**data)
+
+    @classmethod
+    def format_strategy_signal_message(cls, data: Dict[str, Any]) -> str:
+        """Format the independent, high-visibility strategy signal alert."""
+        return cls.STRATEGY_SIGNAL_TEMPLATE.format(**data)
 
     @classmethod
     def format_error_message(cls, data: Dict[str, Any]) -> str:
