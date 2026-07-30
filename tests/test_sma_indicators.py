@@ -185,19 +185,19 @@ class SmaIndicatorApiTests(unittest.TestCase):
 
         self.assertIsNone(gold_service._backtest_signal(frame, 1, 'macd'))
 
-    def test_trend_switch_uses_ma520_in_bull_regime_and_kdj_in_bear_regime(self):
+    def test_trend_switch_uses_kdj_in_bull_regime_and_ma520_in_bear_regime(self):
         frame = resonance_indicator_frame()
 
         bull_signal = gold_service._backtest_signal(frame, 1, 'trend_switch')
         self.assertEqual(bull_signal['action'], 'buy')
-        self.assertIn('MA30 位于 MA60 上方，采用 MA5/20 共振', bull_signal['reason'])
-        self.assertEqual(set(bull_signal['confirmations']), {'ma10_30', 'macd', 'kdj'})
+        self.assertIn('MA30 位于 MA60 上方，采用 KDJ 共振', bull_signal['reason'])
+        self.assertEqual(set(bull_signal['confirmations']), {'ma5_20', 'ma10_30', 'macd'})
 
         frame.loc[1, 'ma30'] = 98
         bear_signal = gold_service._backtest_signal(frame, 1, 'trend_switch')
         self.assertEqual(bear_signal['action'], 'buy')
-        self.assertIn('MA30 位于 MA60 下方，采用 KDJ 共振', bear_signal['reason'])
-        self.assertEqual(set(bear_signal['confirmations']), {'ma5_20', 'ma10_30', 'macd'})
+        self.assertIn('MA30 位于 MA60 下方，采用 MA5/20 共振', bear_signal['reason'])
+        self.assertEqual(set(bear_signal['confirmations']), {'ma10_30', 'macd', 'kdj'})
 
     def test_closing_strategy_signals_collect_all_triggered_strategies(self):
         frame = resonance_indicator_frame()

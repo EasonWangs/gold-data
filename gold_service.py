@@ -65,7 +65,7 @@ MACD_SIGNAL_PERIOD = 9
 SUPPORTED_BACKTEST_STRATEGIES = {
     'ma5_20': {'label': 'MA5/20 交叉', 'basis': 'close', 'parameters': {'fast_period': 5, 'slow_period': 20}},
     'ma10_30': {'label': 'MA10/30 交叉', 'basis': 'close', 'parameters': {'fast_period': 10, 'slow_period': 30}},
-    'trend_switch': {'label': 'MA30/60 趋势切换共振', 'basis': 'close', 'parameters': {'trend_fast_period': 30, 'trend_slow_period': 60, 'bull_strategy': 'ma5_20', 'bear_strategy': 'kdj'}},
+    'trend_switch': {'label': 'MA30/60 趋势切换共振', 'basis': 'close', 'parameters': {'trend_fast_period': 30, 'trend_slow_period': 60, 'bull_strategy': 'kdj', 'bear_strategy': 'ma5_20'}},
     'macd': {'label': 'MACD DIF/DEA 交叉', 'basis': 'close', 'parameters': {'fast_period': 12, 'slow_period': 26, 'signal_period': 9}},
     'kdj': {'label': 'KDJ K/D 交叉', 'basis': 'high-low-close', 'parameters': {'rsv_window': 9, 'k_smoothing_period': 3, 'd_smoothing_period': 3}},
 }
@@ -1412,13 +1412,13 @@ def _backtest_signal(indicators, index, strategy):
         trend_values = (current['ma30'], current['ma60'])
         if any(pd.isna(value) for value in trend_values):
             return None
-        active_strategy = 'ma5_20' if current['ma30'] > current['ma60'] else 'kdj' if current['ma30'] < current['ma60'] else None
+        active_strategy = 'kdj' if current['ma30'] > current['ma60'] else 'ma5_20' if current['ma30'] < current['ma60'] else None
         if active_strategy is None:
             return None
         signal = _backtest_signal(indicators, index, active_strategy)
         if signal is None:
             return None
-        regime = 'MA30 位于 MA60 上方，采用 MA5/20 共振' if active_strategy == 'ma5_20' else 'MA30 位于 MA60 下方，采用 KDJ 共振'
+        regime = 'MA30 位于 MA60 上方，采用 KDJ 共振' if active_strategy == 'kdj' else 'MA30 位于 MA60 下方，采用 MA5/20 共振'
         signal['reason'] = f'{regime}；{signal["reason"]}'
         signal['indicators'] = {
             **signal['indicators'],
