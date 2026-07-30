@@ -444,8 +444,8 @@ class SmaIndicatorApiTests(unittest.TestCase):
 
     def test_calculates_all_requested_windows_from_complete_history(self):
         response, loader = self.request_with_history(
-            daily_history(list(range(1, 41))),
-            'days=5&windows=5,10,20,30',
+            daily_history(list(range(1, 81))),
+            'days=5&windows=5,10,20,30,60',
         )
 
         self.assertEqual(response.status_code, 200)
@@ -453,15 +453,25 @@ class SmaIndicatorApiTests(unittest.TestCase):
         self.assertEqual(loader.call_args.args, (gold_service.GOLD_SYMBOL,))
         self.assertEqual(loader.call_args.kwargs, {'days': None})
         self.assertEqual(body['count'], 5)
-        self.assertEqual(body['available_history_count'], 40)
-        self.assertEqual(body['data'][0]['date'], '2026-07-20')
-        self.assertEqual(body['data'][0]['ma30'], 21.5)
+        self.assertEqual(body['available_history_count'], 80)
+        self.assertEqual(body['data'][0]['date'], '2026-09-14')
+        self.assertEqual(body['data'][0]['ma30'], 61.5)
+        self.assertEqual(body['data'][0]['ma60'], 46.5)
         self.assertEqual(body['latest'], body['data'][0 + 4])
-        self.assertEqual(body['latest']['close'], 40.0)
-        self.assertEqual(body['latest']['ma5'], 38.0)
-        self.assertEqual(body['latest']['ma10'], 35.5)
-        self.assertEqual(body['latest']['ma20'], 30.5)
-        self.assertEqual(body['latest']['ma30'], 25.5)
+        self.assertEqual(body['latest']['close'], 80.0)
+        self.assertEqual(body['latest']['ma5'], 78.0)
+        self.assertEqual(body['latest']['ma10'], 75.5)
+        self.assertEqual(body['latest']['ma20'], 70.5)
+        self.assertEqual(body['latest']['ma30'], 65.5)
+        self.assertEqual(body['latest']['ma60'], 50.5)
+
+    def test_default_windows_include_ma60(self):
+        response, _ = self.request_with_history(daily_history(list(range(1, 81))))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body['windows'], [5, 10, 20, 30, 60])
+        self.assertEqual(body['latest']['ma60'], 50.5)
 
     def test_weekend_gap_does_not_count_as_a_window_entry(self):
         history = pd.DataFrame({

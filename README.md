@@ -85,8 +85,8 @@ curl http://localhost:5080/api/gold/spot_hist_sge?days=5
 # 获取当前交易时段、时区、交易日归属和夜盘说明
 curl http://localhost:5080/api/market/session
 
-# 获取黄金日线 SMA（默认最近 60 个已计算交易日，MA5/10/20/30）
-curl 'http://localhost:5080/api/gold/indicators/sma?days=60&windows=5,10,20,30'
+# 获取黄金日线 SMA（默认最近 60 个已计算交易日，MA5/10/20/30/60）
+curl 'http://localhost:5080/api/gold/indicators/sma?days=60&windows=5,10,20,30,60'
 
 # 获取黄金日线 KDJ（默认最近 60 个交易日）
 curl 'http://localhost:5080/api/gold/indicators/kdj?days=60'
@@ -115,12 +115,12 @@ curl http://localhost:5080/api/silver/spot_hist_sge?days=5
 `GET /api/gold/indicators/sma` 基于上海黄金交易所 `Au99.99` 历史日线的
 `close`（元/克）计算简单移动平均线。窗口只按实际交易日滚动，不补周末或节假日；
 计算会先在完整的已缓存历史序列上完成，再取最近记录，因此返回的首条记录也能拥有
-足够历史时的 MA30。
+足够历史时的 MA60。
 
 | 参数 | 说明 |
 |---|---|
 | `days` | 返回最近多少个已计算交易日；默认 `60`，范围 `1`–`365`。 |
-| `windows` | 逗号分隔的 SMA 窗口；默认 `5,10,20,30`，仅支持这四个值。 |
+| `windows` | 逗号分隔的 SMA 窗口；默认 `5,10,20,30,60`，仅支持这五个值。 |
 
 非法参数（包括 `days <= 0`、`days > 365`、非整数或不支持的窗口）返回 HTTP `400`，不会静默忽略。
 历史交易日不足窗口时，对应 `maN` 为 `null`；`available_history_count` 给出清洗后的可用历史日线数量。
@@ -134,7 +134,7 @@ curl http://localhost:5080/api/silver/spot_hist_sge?days=5
   "symbol": "Au99.99",
   "unit": "元/克",
   "basis": "close",
-  "windows": [5, 10, 20, 30],
+  "windows": [5, 10, 20, 30, 60],
   "data": [
     {
       "date": "2026-07-24",
@@ -142,7 +142,8 @@ curl http://localhost:5080/api/silver/spot_hist_sge?days=5
       "ma5": 809.12,
       "ma10": 805.68,
       "ma20": 798.31,
-      "ma30": 792.45
+      "ma30": 792.45,
+      "ma60": 783.67
     }
   ],
   "latest": {
@@ -151,7 +152,8 @@ curl http://localhost:5080/api/silver/spot_hist_sge?days=5
     "ma5": 809.12,
     "ma10": 805.68,
     "ma20": 798.31,
-    "ma30": 792.45
+    "ma30": 792.45,
+    "ma60": 783.67
   },
   "count": 60,
   "available_history_count": 120
