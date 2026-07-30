@@ -60,6 +60,7 @@ def resonance_indicator_frame():
         'ma10': [100, 104],
         'ma20': [100, 102],
         'ma30': [100, 102],
+        'ma60': [100, 100],
         'dif': [0.1, 1.0],
         'dea': [0.2, 0.5],
         'k': [50, 60],
@@ -184,12 +185,26 @@ class SmaIndicatorApiTests(unittest.TestCase):
 
         self.assertIsNone(gold_service._backtest_signal(frame, 1, 'macd'))
 
+    def test_trend_switch_uses_ma520_in_bull_regime_and_kdj_in_bear_regime(self):
+        frame = resonance_indicator_frame()
+
+        bull_signal = gold_service._backtest_signal(frame, 1, 'trend_switch')
+        self.assertEqual(bull_signal['action'], 'buy')
+        self.assertIn('MA30 位于 MA60 上方，采用 MA5/20 共振', bull_signal['reason'])
+        self.assertEqual(set(bull_signal['confirmations']), {'ma10_30', 'macd', 'kdj'})
+
+        frame.loc[1, 'ma30'] = 98
+        bear_signal = gold_service._backtest_signal(frame, 1, 'trend_switch')
+        self.assertEqual(bear_signal['action'], 'buy')
+        self.assertIn('MA30 位于 MA60 下方，采用 KDJ 共振', bear_signal['reason'])
+        self.assertEqual(set(bear_signal['confirmations']), {'ma5_20', 'ma10_30', 'macd'})
+
     def test_closing_strategy_signals_collect_all_triggered_strategies(self):
         frame = resonance_indicator_frame()
         with patch.object(gold_service, 'build_backtest_indicators', return_value=frame):
             signals = gold_service.collect_closing_strategy_signals(frame, frame.iloc[-1]['date'])
 
-        self.assertEqual([signal['strategy'] for signal in signals], ['ma5_20', 'ma10_30', 'macd', 'kdj'])
+        self.assertEqual([signal['strategy'] for signal in signals], ['ma5_20', 'ma10_30', 'trend_switch', 'macd', 'kdj'])
         self.assertTrue(all(signal['action'] == 'buy' for signal in signals))
         self.assertTrue(all(signal['signal_weight'] == 4 for signal in signals))
 

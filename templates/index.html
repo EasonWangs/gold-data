@@ -246,7 +246,7 @@ curl http://localhost:5080/api/gold/spot_quotations_sge
 # 获取历史价格 (最近5天)
 curl http://localhost:5080/api/gold/spot_hist_sge?days=5
 
-# 运行后端策略回测（MA5/20、MA10/30、MACD、KDJ）
+# 运行后端策略回测（MA5/20、MA10/30、MA30/60 趋势切换、MACD、KDJ）
 curl 'http://localhost:5080/api/gold/backtest?strategy=ma5_20&start=2025-01-01&initial_cash=100000&order_amount=10000'
 
 # 打开独立回测页面
