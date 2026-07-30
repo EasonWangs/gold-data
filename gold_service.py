@@ -1998,7 +1998,7 @@ def create_dingtalk_config():
     """创建钉钉配置文件"""
     config = {
         "webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=YOUR_ACCESS_TOKEN",
-        "link_url": "http://127.0.0.1:5080",
+        "link_url": "http://gold.neoxmind.com/",
         "description": "钉钉机器人配置文件"
     }
 
