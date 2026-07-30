@@ -43,6 +43,7 @@ service_status = {
 }
 
 ADMIN_TOKEN_ENV = 'GOLD_ADMIN_TOKEN'
+CORS_ALLOWED_ORIGINS_ENV = 'GOLD_CORS_ALLOWED_ORIGINS'
 REALTIME_CACHE_TTL_SECONDS = 60
 # 末尾报价相对前一有效报价的最大允许偏差（1.36%）。
 REALTIME_TERMINAL_OUTLIER_MAX_CHANGE_RATIO = 0.0136
@@ -93,6 +94,33 @@ SCHEDULER_CONTROL_MESSAGE = (
     '`python gold_service.py --scheduler-only` 启动。'
 )
 scheduled_pushes = set()
+
+
+def get_allowed_cors_origins():
+    """Return the explicitly configured browser origins allowed to call the API."""
+    raw_origins = os.environ.get(CORS_ALLOWED_ORIGINS_ENV, '')
+    return {
+        origin.strip().rstrip('/')
+        for origin in raw_origins.split(',')
+        if origin.strip().startswith(('http://', 'https://'))
+    }
+
+
+@app.after_request
+def add_configured_cors_headers(response):
+    """Allow only configured cross-origin browser clients, never a wildcard."""
+    origin = request.headers.get('Origin', '').rstrip('/')
+    if origin not in get_allowed_cors_origins():
+        return response
+
+    response.headers['Access-Control-Allow-Origin'] = origin
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Admin-Token'
+
+    existing_vary = response.headers.get('Vary', '')
+    if 'Origin' not in {value.strip() for value in existing_vary.split(',')}:
+        response.headers['Vary'] = ', '.join(filter(None, (existing_vary, 'Origin')))
+    return response
 
 
 def market_now():

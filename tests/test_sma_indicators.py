@@ -1,5 +1,6 @@
 import sys
 import unittest
+import os
 from datetime import datetime, time
 from pathlib import Path
 from unittest.mock import patch
@@ -678,6 +679,25 @@ class SmaIndicatorApiTests(unittest.TestCase):
         )
 
         self.assertEqual(quotes['现价'].tolist(), [770.0, 771.2, 771.5])
+
+    def test_cors_allows_only_explicitly_configured_origins(self):
+        allowed_origin = 'https://frontend.example.com'
+        with patch.dict(os.environ, {
+            gold_service.CORS_ALLOWED_ORIGINS_ENV: allowed_origin,
+        }):
+            allowed = self.client.get('/api/info', headers={'Origin': allowed_origin})
+            rejected = self.client.get('/api/info', headers={'Origin': 'https://untrusted.example.com'})
+            preflight = self.client.options('/api/push/test', headers={
+                'Origin': allowed_origin,
+                'Access-Control-Request-Method': 'POST',
+                'Access-Control-Request-Headers': 'X-Admin-Token',
+            })
+
+        self.assertEqual(allowed.headers.get('Access-Control-Allow-Origin'), allowed_origin)
+        self.assertIn('Origin', allowed.headers.get('Vary', ''))
+        self.assertIsNone(rejected.headers.get('Access-Control-Allow-Origin'))
+        self.assertEqual(preflight.status_code, 200)
+        self.assertEqual(preflight.headers.get('Access-Control-Allow-Headers'), 'Content-Type, X-Admin-Token')
 
     def test_night_opening_push_uses_the_next_trading_day_and_first_quote(self):
         service = gold_service.GoldService()

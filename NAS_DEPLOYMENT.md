@@ -35,6 +35,14 @@ GOLD_HOST_PORT=127.0.0.1:5080
 
 然后把反向代理的上游设为 `http://127.0.0.1:5080`，并将 `dingtalk_config.json` 的 `link_url` 改为 HTTPS 域名。若反向代理运行在另一个 Docker 容器中，不要使用 `127.0.0.1`；应把两个服务加入同一 Docker 网络，并以服务名访问。
 
+若前端必须从不同域名直接访问 API，在 NAS 的 `.env` 中配置前端页面的实际来源（不是 API 地址）：
+
+```env
+GOLD_CORS_ALLOWED_ORIGINS=https://frontend.example.com
+```
+
+多个前端来源用英文逗号分隔。服务只会向明确列出的 `http` 或 `https` 来源返回 CORS 响应头；请勿设置通配符 `*`。修改后执行 `docker compose up -d --build` 使配置生效。
+
 ## 4. 更新与排查
 
 ```bash
