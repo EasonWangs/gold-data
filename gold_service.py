@@ -62,10 +62,16 @@ KDJ_SMOOTHING_PERIOD = 3
 MACD_FAST_PERIOD = 12
 MACD_SLOW_PERIOD = 26
 MACD_SIGNAL_PERIOD = 9
+# Keep closing-push signals in step with the front-end KDJ backtest defaults.
+# KDJ itself is the one fixed trigger; the four indicators below can each add
+# one unit of position weight.  The KDJ extremes are directional adjustments
+# configured by the front end as well.
+KDJ_PUSH_LOW_GOLDEN_CROSS_LEVEL = 35
+KDJ_PUSH_HIGH_GOLDEN_CROSS_LEVEL = 88
+KDJ_PUSH_HIGH_DEATH_CROSS_LEVEL = 88
 SUPPORTED_BACKTEST_STRATEGIES = {
     'ma5_20': {'label': 'MA5/20 交叉', 'basis': 'close', 'parameters': {'fast_period': 5, 'slow_period': 20}},
     'ma10_30': {'label': 'MA10/30 交叉', 'basis': 'close', 'parameters': {'fast_period': 10, 'slow_period': 30}},
-    'trend_switch': {'label': 'MA30/60 趋势切换共振', 'basis': 'close', 'parameters': {'trend_fast_period': 30, 'trend_slow_period': 60, 'bull_strategy': 'ma5_20', 'bear_strategy': 'kdj'}},
     'macd': {'label': 'MACD DIF/DEA 交叉', 'basis': 'close', 'parameters': {'fast_period': 12, 'slow_period': 26, 'signal_period': 9}},
     'kdj': {'label': 'KDJ K/D 交叉', 'basis': 'high-low-close', 'parameters': {'rsv_window': 9, 'k_smoothing_period': 3, 'd_smoothing_period': 3}},
 }
@@ -707,7 +713,7 @@ class GoldService:
             return False, '无法获取收盘价格数据'
 
     def _push_closing_strategy_signals(self, history_data, trading_date, close_price, simulation):
-        """Send an attention-grabbing, separate DingTalk message for close signals."""
+        """Send the front-end-default, KDJ-primary close signal to DingTalk."""
         try:
             signals = collect_closing_strategy_signals(history_data, trading_date)
         except Exception:
@@ -717,13 +723,15 @@ class GoldService:
         if not signals:
             return None
 
-        action_labels = {'buy': '买入', 'sell': '卖出'}
         action_emojis = {'buy': '🟢', 'sell': '🔴'}
         lines = []
         for signal in signals:
+            action_label = '买入' if signal['action'] == 'buy' else '卖出'
+            weight_names = '、'.join(signal['confirmations']) or '无额外加权策略'
             lines.append(
-                f"{action_emojis[signal['action']]} **{signal['strategy_name']}**："
-                f"{action_labels[signal['action']]} · **{signal['signal_weight']}× 共振**"
+                f"{action_emojis[signal['action']]} **KDJ {action_label}** · "
+                f"**{action_label}权重 x{signal['signal_weight']}**\n\n"
+                f"> 权重策略：{weight_names}"
             )
         message = MessageTemplate.format_strategy_signal_message({
             'date': trading_date.isoformat(),
@@ -1408,24 +1416,6 @@ def _backtest_signal(indicators, index, strategy):
     current = indicators.iloc[index]
     previous = indicators.iloc[index - 1]
 
-    if strategy == 'trend_switch':
-        trend_values = (current['ma30'], current['ma60'])
-        if any(pd.isna(value) for value in trend_values):
-            return None
-        active_strategy = 'ma5_20' if current['ma30'] > current['ma60'] else 'kdj' if current['ma30'] < current['ma60'] else None
-        if active_strategy is None:
-            return None
-        signal = _backtest_signal(indicators, index, active_strategy)
-        if signal is None:
-            return None
-        regime = 'MA30 位于 MA60 上方，采用 MA5/20 共振' if active_strategy == 'ma5_20' else 'MA30 位于 MA60 下方，采用 KDJ 共振'
-        signal['reason'] = f'{regime}；{signal["reason"]}'
-        signal['indicators'] = {
-            **signal['indicators'],
-            'ma30': current['ma30'],
-            'ma60': current['ma60'],
-        }
-        return signal
     if strategy in ('ma5_20', 'ma10_30'):
         fast_period, slow_period = (
             (5, 20) if strategy == 'ma5_20' else (10, 30)
@@ -1485,11 +1475,12 @@ def _serialise_backtest_indicators(values):
 
 
 def collect_closing_strategy_signals(history_data, trading_date):
-    """Collect all crossover signals for one published daily bar.
+    """Collect the KDJ-primary closing signal and front-end-default weights.
 
-    The closing push uses the official daily bar that it is about to report,
-    so strategy signals and the published close always refer to the same SGE
-    trading day.  A primary crossover can yield one result for each strategy.
+    The push has one trigger strategy only: a K/D crossover.  Position weight
+    follows the front-end defaults: MA5/20, MA10/30, MACD direction and MACD
+    zero-axis position each contribute +1; KDJ's configured extreme-cross
+    adjustments are applied afterwards.
     """
     indicators = build_backtest_indicators(history_data)
     if indicators.empty:
@@ -1501,19 +1492,58 @@ def collect_closing_strategy_signals(history_data, trading_date):
         return []
 
     index = indicators.index.get_loc(matches[-1])
-    signals = []
-    for strategy, definition in SUPPORTED_BACKTEST_STRATEGIES.items():
-        signal = _backtest_signal(indicators, index, strategy)
-        if signal is None:
-            continue
-        signals.append({
-            'strategy': strategy,
-            'strategy_name': definition['label'],
-            'action': signal['action'],
-            'signal_weight': signal['signal_weight'],
-            'confirmations': signal['confirmations'],
-        })
-    return signals
+    signal = _backtest_signal(indicators, index, 'kdj')
+    if signal is None:
+        return []
+
+    current = indicators.iloc[index]
+    previous = indicators.iloc[index - 1]
+    action = signal['action']
+    is_buy = action == 'buy'
+    confirmations = []
+
+    def is_directional(left, right):
+        if pd.isna(left) or pd.isna(right):
+            return False
+        return left > right if is_buy else left < right
+
+    weighted_strategies = (
+        ('MA5/20', is_directional(current['ma5'], current['ma20'])),
+        ('MA10/30', is_directional(current['ma10'], current['ma30'])),
+        ('MACD', is_directional(current['dif'], current['dea'])),
+        (
+            'MACD 零轴',
+            not pd.isna(current['dif']) and not pd.isna(current['dea'])
+            and (current['dif'] > 0 and current['dea'] > 0 if is_buy
+                 else current['dif'] < 0 and current['dea'] < 0),
+        ),
+    )
+    confirmations.extend(name for name, active in weighted_strategies if active)
+
+    # This mirrors the front end's linear K/D crossing-point calculation.
+    previous_gap = previous['k'] - previous['d']
+    current_gap = current['k'] - current['d']
+    cross_level = previous['k'] + (current['k'] - previous['k']) * (
+        previous_gap / (previous_gap - current_gap)
+    )
+    kdj_adjustment = 0
+    if is_buy and cross_level < KDJ_PUSH_LOW_GOLDEN_CROSS_LEVEL:
+        confirmations.append('KDJ 低位金叉')
+        kdj_adjustment = 1
+    elif is_buy and cross_level > KDJ_PUSH_HIGH_GOLDEN_CROSS_LEVEL:
+        confirmations.append('KDJ 高位金叉 -1')
+        kdj_adjustment = -1
+    elif not is_buy and cross_level > KDJ_PUSH_HIGH_DEATH_CROSS_LEVEL:
+        confirmations.append('KDJ 高位死叉')
+        kdj_adjustment = 1
+
+    return [{
+        'strategy': 'kdj',
+        'strategy_name': 'KDJ',
+        'action': action,
+        'signal_weight': 1 + len([name for name, active in weighted_strategies if active]) + kdj_adjustment,
+        'confirmations': confirmations,
+    }]
 
 
 def run_strategy_backtest(history_data, strategy='ma5_20', start_date=None, end_date=None,

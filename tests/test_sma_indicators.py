@@ -185,28 +185,19 @@ class SmaIndicatorApiTests(unittest.TestCase):
 
         self.assertIsNone(gold_service._backtest_signal(frame, 1, 'macd'))
 
-    def test_trend_switch_uses_ma520_in_bull_regime_and_kdj_in_bear_regime(self):
-        frame = resonance_indicator_frame()
-
-        bull_signal = gold_service._backtest_signal(frame, 1, 'trend_switch')
-        self.assertEqual(bull_signal['action'], 'buy')
-        self.assertIn('MA30 位于 MA60 上方，采用 MA5/20 共振', bull_signal['reason'])
-        self.assertEqual(set(bull_signal['confirmations']), {'ma10_30', 'macd', 'kdj'})
-
-        frame.loc[1, 'ma30'] = 98
-        bear_signal = gold_service._backtest_signal(frame, 1, 'trend_switch')
-        self.assertEqual(bear_signal['action'], 'buy')
-        self.assertIn('MA30 位于 MA60 下方，采用 KDJ 共振', bear_signal['reason'])
-        self.assertEqual(set(bear_signal['confirmations']), {'ma5_20', 'ma10_30', 'macd'})
-
-    def test_closing_strategy_signals_collect_all_triggered_strategies(self):
+    def test_closing_strategy_signal_uses_kdj_as_the_only_primary_strategy(self):
         frame = resonance_indicator_frame()
         with patch.object(gold_service, 'build_backtest_indicators', return_value=frame):
             signals = gold_service.collect_closing_strategy_signals(frame, frame.iloc[-1]['date'])
 
-        self.assertEqual([signal['strategy'] for signal in signals], ['ma5_20', 'ma10_30', 'trend_switch', 'macd', 'kdj'])
-        self.assertTrue(all(signal['action'] == 'buy' for signal in signals))
-        self.assertTrue(all(signal['signal_weight'] == 4 for signal in signals))
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals[0]['strategy'], 'kdj')
+        self.assertEqual(signals[0]['action'], 'buy')
+        self.assertEqual(signals[0]['signal_weight'], 5)
+        self.assertEqual(
+            signals[0]['confirmations'],
+            ['MA5/20', 'MA10/30', 'MACD', 'MACD 零轴'],
+        )
 
     def test_closing_push_sends_strategy_action_and_weight_as_separate_alert(self):
         service = gold_service.gold_service
@@ -218,7 +209,12 @@ class SmaIndicatorApiTests(unittest.TestCase):
             'low': [99.0, 100.0],
             'close': [101.0, 102.0],
         })
-        signals = [{'strategy_name': 'MA5/20 交叉', 'action': 'buy', 'signal_weight': 3}]
+        signals = [{
+            'strategy_name': 'KDJ',
+            'action': 'buy',
+            'signal_weight': 5,
+            'confirmations': ['MA5/20', 'MA10/30', 'MACD', 'MACD 零轴'],
+        }]
         with (
             patch.object(service, 'is_trading_day', return_value=True),
             patch.object(service, 'get_historical_gold_price', return_value=history),
@@ -232,11 +228,11 @@ class SmaIndicatorApiTests(unittest.TestCase):
         self.assertEqual(sender.call_count, 2)
         closing_message = sender.call_args_list[0].args[0]
         strategy_message = sender.call_args_list[1].args[0]
-        self.assertNotIn('MA5/20 交叉', closing_message)
+        self.assertNotIn('KDJ 买入', closing_message)
         self.assertIn('🚨 黄金策略交易信号', strategy_message)
-        self.assertIn('MA5/20 交叉', strategy_message)
-        self.assertIn('买入', strategy_message)
-        self.assertIn('3× 共振', strategy_message)
+        self.assertIn('KDJ 买入', strategy_message)
+        self.assertIn('买入权重 x5', strategy_message)
+        self.assertIn('MA5/20、MA10/30、MACD、MACD 零轴', strategy_message)
         self.assertEqual(sender.call_args_list[1].kwargs['title'], '🚨 黄金策略信号')
 
     def test_simulated_closing_push_uses_latest_published_daily_bar(self):
