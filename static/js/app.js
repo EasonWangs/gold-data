@@ -130,6 +130,10 @@ createApp({
             await this.performPush('/api/push/closing?mode=latest', '模拟推送收盘价');
         },
 
+        async testKdjSignalPush() {
+            await this.performPush('/api/push/kdj-signal', '测试 KDJ 策略推送');
+        },
+
         async pushNightOpening() {
             await this.performPush('/api/push/night-opening', '推送夜盘开盘价');
         },

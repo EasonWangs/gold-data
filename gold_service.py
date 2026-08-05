@@ -752,6 +752,37 @@ class GoldService:
         logger.error('钉钉未接受收盘策略信号推送')
         return False
 
+    def push_latest_kdj_strategy_signal(self):
+        """Test the latest published daily bar and send only a KDJ signal.
+
+        This is deliberately separate from the simulated close push: operators
+        can verify whether the latest KDJ crossover would alert DingTalk without
+        also sending a price bulletin.  A ``None`` result means the check was
+        successful but the latest bar did not trigger KDJ.
+        """
+        logger.info('开始检查最新已发布日线的 KDJ 策略信号...')
+        history_data = self.get_historical_gold_price(force_refresh=True)
+        if history_data is None or history_data.empty:
+            return False, '无法获取最新已发布日线，未发送 KDJ 策略信号'
+
+        latest = history_data.iloc[-1]
+        trading_date = normalize_history_date(latest.get('date'))
+        close_price = latest.get('close')
+        if trading_date is None or pd.isna(close_price):
+            return False, '最新日线数据不完整，未发送 KDJ 策略信号'
+
+        strategy_result = self._push_closing_strategy_signals(
+            history_data,
+            trading_date,
+            float(close_price),
+            simulation=True,
+        )
+        if strategy_result is True:
+            return True, f'KDJ 策略模拟推送成功（{trading_date.isoformat()}）'
+        if strategy_result is None:
+            return None, f'最新日线（{trading_date.isoformat()}）未触发 KDJ 买入或卖出，未发送推送'
+        return False, 'KDJ 策略推送发送失败'
+
     def test_push(self):
         """测试推送功能"""
         logger.info("测试推送功能...")
@@ -1988,6 +2019,34 @@ def api_push_closing():
             'status': 'error',
             'message': f'收盘价推送失败: {str(e)}',
             'timestamp': market_timestamp()
+        }), 500
+
+
+@app.route('/api/push/kdj-signal', methods=['POST'])
+@require_admin_token
+def api_push_kdj_signal():
+    """Test the latest published bar and send a KDJ alert only if it crosses."""
+    try:
+        sent, message = gold_service.push_latest_kdj_strategy_signal()
+        if sent is False:
+            return jsonify({
+                'status': 'error',
+                'message': message,
+                'timestamp': market_timestamp(),
+            }), 502
+
+        return jsonify({
+            'status': 'success',
+            'message': message,
+            'sent': sent is True,
+            'timestamp': market_timestamp(),
+        })
+    except Exception as e:
+        logger.exception('KDJ 策略测试推送失败')
+        return jsonify({
+            'status': 'error',
+            'message': f'KDJ 策略测试推送失败: {str(e)}',
+            'timestamp': market_timestamp(),
         }), 500
 
 

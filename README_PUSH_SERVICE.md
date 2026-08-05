@@ -34,9 +34,11 @@ export GOLD_ADMIN_TOKEN='请替换为随机且足够长的令牌'
 # 测试机器人连接
 curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://127.0.0.1:5080/api/push/test
 
-# 手动发送开盘价、夜盘开盘价和“最新已发布日线”的模拟收盘快报
+# 手动发送开盘价、夜盘开盘价、“最新已发布日线”的模拟收盘快报，
+# 或只在最新日线触发 KDJ 交叉时发送策略消息
 curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://127.0.0.1:5080/api/push/opening
 curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" 'http://127.0.0.1:5080/api/push/closing?mode=latest'
+curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://127.0.0.1:5080/api/push/kdj-signal
 curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://127.0.0.1:5080/api/push/night-opening
 
 # 查看调度规则与当前市场时段；该接口不控制调度器
@@ -56,6 +58,9 @@ curl -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://127.0.0.1:5080/api/service/sta
 管理页的“模拟推送最新日线收盘”和 `POST /api/push/closing?mode=latest` 使用最新已发布日线，
 即使它不是今天的日线也可用于检查机器人内容；消息标题和正文会明确标注为模拟。定时器仍只在
 当日官方完整日线发布后发送正式收盘快报。
+
+管理页的“测试 KDJ 策略推送”和 `POST /api/push/kdj-signal` 只检查最新已发布日线：若触发
+KDJ 买入或卖出，才发送同一套模拟策略消息；未触发时返回检查结果，不会发送任何钉钉消息或价格快报。
 
 ## 价格边界
 

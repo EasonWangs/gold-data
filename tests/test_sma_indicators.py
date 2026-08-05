@@ -235,6 +235,52 @@ class SmaIndicatorApiTests(unittest.TestCase):
         self.assertIn('MA5/20、MA10/30、MACD、MACD 零轴', strategy_message)
         self.assertEqual(sender.call_args_list[1].kwargs['title'], '🚨 黄金策略信号')
 
+    def test_manual_kdj_signal_push_sends_only_the_triggered_strategy_message(self):
+        service = gold_service.gold_service
+        history = pd.DataFrame({
+            'date': ['2026-06-01', '2026-06-02'],
+            'open': [100.0, 101.0],
+            'high': [102.0, 103.0],
+            'low': [99.0, 100.0],
+            'close': [101.0, 102.0],
+        })
+        signal = {
+            'strategy_name': 'KDJ',
+            'action': 'buy',
+            'signal_weight': 5,
+            'confirmations': ['MA5/20', 'MA10/30', 'MACD', 'MACD 零轴'],
+        }
+        with (
+            patch.object(service, 'get_historical_gold_price', return_value=history) as loader,
+            patch.object(service, 'send_message', return_value=True) as sender,
+            patch.object(gold_service, 'collect_closing_strategy_signals', return_value=[signal]),
+        ):
+            success, message = service.push_latest_kdj_strategy_signal()
+
+        self.assertTrue(success)
+        self.assertIn('2026-06-02', message)
+        loader.assert_called_once_with(force_refresh=True)
+        self.assertEqual(sender.call_count, 1)
+        self.assertIn('KDJ 买入', sender.call_args.args[0])
+        self.assertEqual(sender.call_args.kwargs['title'], '🚨 黄金策略信号（模拟）')
+
+    def test_manual_kdj_signal_push_reports_when_latest_bar_has_no_cross(self):
+        service = gold_service.gold_service
+        history = pd.DataFrame({
+            'date': ['2026-06-01', '2026-06-02'],
+            'close': [101.0, 102.0],
+        })
+        with (
+            patch.object(service, 'get_historical_gold_price', return_value=history),
+            patch.object(service, 'send_message') as sender,
+            patch.object(gold_service, 'collect_closing_strategy_signals', return_value=[]),
+        ):
+            success, message = service.push_latest_kdj_strategy_signal()
+
+        self.assertIsNone(success)
+        self.assertIn('未触发 KDJ', message)
+        sender.assert_not_called()
+
     def test_simulated_closing_push_uses_latest_published_daily_bar(self):
         service = gold_service.gold_service
         now = datetime(2026, 6, 3, 16, 2, tzinfo=gold_service.MARKET_TIMEZONE)
