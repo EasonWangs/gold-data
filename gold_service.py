@@ -712,7 +712,8 @@ class GoldService:
             self.send_message(error_msg, title="数据获取失败")
             return False, '无法获取收盘价格数据'
 
-    def _push_closing_strategy_signals(self, history_data, trading_date, close_price, simulation):
+    def _push_closing_strategy_signals(self, history_data, trading_date, close_price, simulation,
+                                       simulation_note=None):
         """Send the front-end-default, KDJ-primary close signal to DingTalk."""
         try:
             signals = collect_closing_strategy_signals(history_data, trading_date)
@@ -738,7 +739,9 @@ class GoldService:
             'close_price': float(close_price),
             'signals': '\n\n'.join(lines),
             'simulation_note': (
-                '> ⚠️ 此为手动模拟推送，展示最新已发布的官方日线。\n'
+                simulation_note
+                if simulation_note is not None
+                else '> ⚠️ 此为手动模拟推送，展示最新已发布的官方日线。\n'
                 if simulation else ''
             ),
             'link_url': self.link_url,
@@ -752,15 +755,59 @@ class GoldService:
         logger.error('钉钉未接受收盘策略信号推送')
         return False
 
-    def push_latest_kdj_strategy_signal(self):
-        """Test the latest published daily bar and send only a KDJ signal.
+    def _build_realtime_trading_day_bar(self, spot_data, market_time):
+        """Build the front-end-equivalent provisional daily bar from live ticks.
 
-        This is deliberately separate from the simulated close push: operators
-        can verify whether the latest KDJ crossover would alert DingTalk without
-        also sending a price bulletin.  A ``None`` result means the check was
-        successful but the latest bar did not trigger KDJ.
+        This is only for the manual KDJ check before the official daily bar is
+        published.  The resulting bar never reaches the scheduled settlement
+        path, which must continue to use the source's completed OHLC data.
         """
-        logger.info('开始检查最新已发布日线的 KDJ 策略信号...')
+        if spot_data is None or spot_data.empty:
+            return None
+
+        trading_day = get_sge_trading_day(market_time)
+        candidates = []
+        for _, row in spot_data.iterrows():
+            quote_clock = self._quote_clock(row.get('时间'))
+            if quote_clock is None:
+                continue
+            quote_datetime = resolve_realtime_quote_datetime(quote_clock, market_time)
+            if quote_datetime is None or get_sge_trading_day(quote_datetime) != trading_day:
+                continue
+            price = pd.to_numeric(pd.Series([row.get('现价')]), errors='coerce').iloc[0]
+            if pd.isna(price) or not math.isfinite(float(price)) or price <= 0:
+                continue
+            candidates.append((quote_datetime, quote_clock, float(price)))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: item[0])
+        latest_price = candidates[-1][2]
+        opening_price = next(
+            (price for _, quote_clock, price in candidates
+             if quote_clock.hour == 9 and quote_clock.minute == 0),
+            latest_price,
+        )
+        prices = [price for _, _, price in candidates]
+        return {
+            'date': trading_day,
+            'open': opening_price,
+            'high': max(prices),
+            'low': min(prices),
+            'close': latest_price,
+        }
+
+    def push_latest_kdj_strategy_signal(self):
+        """Test the current KDJ signal and send only its strategy message.
+
+        Before the source publishes the current official daily bar, compose a
+        provisional bar from same-trading-day realtime ticks, matching the
+        front end.  This is deliberately separate from the simulated close
+        push: the 16:02 settlement push keeps using only official daily OHLC.
+        A ``None`` result means the check completed without a KDJ crossover.
+        """
+        logger.info('开始检查当前交易日的 KDJ 策略信号...')
         history_data = self.get_historical_gold_price(force_refresh=True)
         if history_data is None or history_data.empty:
             return False, '无法获取最新已发布日线，未发送 KDJ 策略信号'
@@ -771,16 +818,41 @@ class GoldService:
         if trading_date is None or pd.isna(close_price):
             return False, '最新日线数据不完整，未发送 KDJ 策略信号'
 
+        market_time = market_now()
+        current_trading_day = get_sge_trading_day(market_time)
+        uses_realtime_bar = trading_date.isoformat() != current_trading_day
+        if uses_realtime_bar:
+            realtime_bar = self._build_realtime_trading_day_bar(
+                self.get_real_time_gold_price(),
+                market_time,
+            )
+            if realtime_bar is not None:
+                history_data = pd.concat(
+                    [history_data, pd.DataFrame([realtime_bar])],
+                    ignore_index=True,
+                )
+                latest = history_data.iloc[-1]
+                trading_date = normalize_history_date(latest['date'])
+                close_price = latest['close']
+            else:
+                uses_realtime_bar = False
+
         strategy_result = self._push_closing_strategy_signals(
             history_data,
             trading_date,
             float(close_price),
             simulation=True,
+            simulation_note=(
+                '> ⚠️ 此为手动模拟推送，使用当前实时行情合成的盘中日线；'
+                '正式收盘仍以官方完整日线为准。\n'
+                if uses_realtime_bar else None
+            ),
         )
+        bar_label = '当前盘中合成日线' if uses_realtime_bar else '最新已发布日线'
         if strategy_result is True:
-            return True, f'KDJ 策略模拟推送成功（{trading_date.isoformat()}）'
+            return True, f'KDJ 策略模拟推送成功（{trading_date.isoformat()}，{bar_label}）'
         if strategy_result is None:
-            return None, f'最新日线（{trading_date.isoformat()}）未触发 KDJ 买入或卖出，未发送推送'
+            return None, f'{bar_label}（{trading_date.isoformat()}）未触发 KDJ 买入或卖出，未发送推送'
         return False, 'KDJ 策略推送发送失败'
 
     def test_push(self):

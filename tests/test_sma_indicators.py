@@ -237,6 +237,7 @@ class SmaIndicatorApiTests(unittest.TestCase):
 
     def test_manual_kdj_signal_push_sends_only_the_triggered_strategy_message(self):
         service = gold_service.gold_service
+        market_time = datetime(2026, 6, 2, 16, 2, tzinfo=gold_service.MARKET_TIMEZONE)
         history = pd.DataFrame({
             'date': ['2026-06-01', '2026-06-02'],
             'open': [100.0, 101.0],
@@ -254,6 +255,7 @@ class SmaIndicatorApiTests(unittest.TestCase):
             patch.object(service, 'get_historical_gold_price', return_value=history) as loader,
             patch.object(service, 'send_message', return_value=True) as sender,
             patch.object(gold_service, 'collect_closing_strategy_signals', return_value=[signal]),
+            patch.object(gold_service, 'market_now', return_value=market_time),
         ):
             success, message = service.push_latest_kdj_strategy_signal()
 
@@ -266,6 +268,7 @@ class SmaIndicatorApiTests(unittest.TestCase):
 
     def test_manual_kdj_signal_push_reports_when_latest_bar_has_no_cross(self):
         service = gold_service.gold_service
+        market_time = datetime(2026, 6, 2, 16, 2, tzinfo=gold_service.MARKET_TIMEZONE)
         history = pd.DataFrame({
             'date': ['2026-06-01', '2026-06-02'],
             'close': [101.0, 102.0],
@@ -274,12 +277,59 @@ class SmaIndicatorApiTests(unittest.TestCase):
             patch.object(service, 'get_historical_gold_price', return_value=history),
             patch.object(service, 'send_message') as sender,
             patch.object(gold_service, 'collect_closing_strategy_signals', return_value=[]),
+            patch.object(gold_service, 'market_now', return_value=market_time),
         ):
             success, message = service.push_latest_kdj_strategy_signal()
 
         self.assertIsNone(success)
         self.assertIn('未触发 KDJ', message)
         sender.assert_not_called()
+
+    def test_manual_kdj_signal_push_uses_a_realtime_bar_before_daily_history_is_published(self):
+        service = gold_service.gold_service
+        market_time = datetime(2026, 6, 2, 14, 30, tzinfo=gold_service.MARKET_TIMEZONE)
+        history = pd.DataFrame({
+            'date': ['2026-06-01'],
+            'open': [100.0],
+            'high': [102.0],
+            'low': [99.0],
+            'close': [101.0],
+        })
+        quotes = pd.DataFrame({
+            '时间': [time(9), time(10), time(14, 30)],
+            '现价': [102.0, 104.0, 103.0],
+        })
+        signal = {
+            'strategy_name': 'KDJ',
+            'action': 'buy',
+            'signal_weight': 5,
+            'confirmations': ['MA5/20', 'MA10/30', 'MACD', 'MACD 零轴'],
+        }
+        collected_history = []
+        def collect_signal(frame, trading_date):
+            collected_history.append((frame, trading_date))
+            return [signal]
+
+        with (
+            patch.object(service, 'get_historical_gold_price', return_value=history),
+            patch.object(service, 'get_real_time_gold_price', return_value=quotes),
+            patch.object(service, 'send_message', return_value=True) as sender,
+            patch.object(gold_service, 'collect_closing_strategy_signals', side_effect=collect_signal),
+            patch.object(gold_service, 'market_now', return_value=market_time),
+        ):
+            success, message = service.push_latest_kdj_strategy_signal()
+
+        self.assertTrue(success)
+        self.assertIn('当前盘中合成日线', message)
+        frame, trading_date = collected_history[0]
+        self.assertEqual(trading_date.isoformat(), '2026-06-02')
+        self.assertEqual(frame.iloc[-1][['open', 'high', 'low', 'close']].to_dict(), {
+            'open': 102.0,
+            'high': 104.0,
+            'low': 102.0,
+            'close': 103.0,
+        })
+        self.assertIn('当前实时行情合成的盘中日线', sender.call_args.args[0])
 
     def test_simulated_closing_push_uses_latest_published_daily_bar(self):
         service = gold_service.gold_service
