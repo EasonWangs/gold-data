@@ -1,6 +1,6 @@
 # 🏅 黄金与白银价格服务
 
-**上金所黄金、白银行情 API 与钉钉交易时段快报服务**
+**上金所黄金、白银行情 API 与钉钉、飞书交易时段快报服务**
 
 集成数据获取、推送通知和Web管理的完整解决方案。
 
@@ -15,7 +15,8 @@
 ```bash
 cp .env.example .env
 cp dingtalk_config.example.json dingtalk_config.json
-# 编辑 .env 和 dingtalk_config.json，填入管理令牌和钉钉 Webhook
+cp feishu_config.example.json feishu_config.json
+# 编辑 .env 和各渠道配置；不使用的渠道可将 enabled 设为 false
 docker compose up -d --build
 ```
 
@@ -44,11 +45,11 @@ python gold_service.py
 python gold_service.py --scheduler-only
 ```
 
-### 配置钉钉推送
-1. 编辑 `dingtalk_config.json` 文件
-2. 替换 webhook 中的 `YOUR_ACCESS_TOKEN`
-3. 设置管理令牌（请使用随机且足够长的值）：`export GOLD_ADMIN_TOKEN='请替换为随机令牌'`
-4. 重启服务生效
+### 配置推送渠道
+1. 复制所需渠道的示例配置；Docker 部署时两个配置文件都需存在，未使用的渠道请设置 `"enabled": false`。
+2. 在 `dingtalk_config.json` 或 `feishu_config.json` 填入机器人 Webhook。
+3. 设置管理令牌（请使用随机且足够长的值）：`export GOLD_ADMIN_TOKEN='请替换为随机令牌'`。
+4. 重启服务生效。已启用的钉钉与飞书渠道会同时收到推送。
 
 ## 🌟 核心功能
 
@@ -60,10 +61,10 @@ python gold_service.py --scheduler-only
 - ⚠️ **实时异常处置**: 因上游数据源偶发在分钟行情末尾返回异常占位报价，接口会将末尾 1 分钟报价与前一有效报价比较；偏差达到或超过 1.36% 时丢弃该条，避免错误值进入接口响应和缓存。
 - 🔌 **标准接口**: RESTful API 设计，JSON 格式响应
 
-### 2️⃣ 钉钉推送服务
+### 2️⃣ 推送服务
 - ⏰ **定时推送**: 工作日 09:02 日盘开盘、16:02 日线收盘、20:02 夜盘开盘
 - 📱 **手动推送**: 日盘开盘、日线收盘、夜盘开盘快报
-- 🧪 **测试功能**: 一键测试钉钉推送连接
+- 🧪 **测试功能**: 一键测试已启用的钉钉、飞书推送连接
 - 🗓️ **数据保护**: 仅在对应开盘后五分钟取得首个有效报价时发送；日线尚未发布时不伪造收盘数据。
 
 ### 3️⃣ Web管理界面
@@ -265,7 +266,7 @@ curl -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/service/sta
 
 `/api/service/start` 与 `/api/service/stop` 已停用，避免 Gunicorn 多 Worker 重复启动调度器。请使用进程管理器启动或停止 `python gold_service.py --scheduler-only`。
 
-## ⚙️ 钉钉推送配置
+## ⚙️ 推送渠道配置
 
 ### 创建钉钉机器人
 1. 在钉钉群中点击 **群设置** → **智能群助手** → **添加机器人**
@@ -284,6 +285,26 @@ curl -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/service/sta
 ```
 
 编辑配置文件，将 `YOUR_ACCESS_TOKEN` 替换为实际的token。
+
+### 创建飞书机器人
+1. 在目标飞书群中进入 **群设置** → **群机器人** → **添加机器人**。
+2. 选择 **自定义机器人**，复制生成的 Webhook 地址。
+3. 复制并编辑配置文件：
+
+```bash
+cp feishu_config.example.json feishu_config.json
+```
+
+```json
+{
+  "enabled": true,
+  "webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_WEBHOOK_KEY",
+  "secret": "",
+  "link_url": "https://gold.example.com/"
+}
+```
+
+如果飞书机器人启用了“签名校验”，将对应的签名密钥填入 `secret`；未启用时保持为空。飞书使用消息卡片推送，因此现有行情快报的 Markdown 格式和链接会保留。配置文件均含有机器人密钥，已默认忽略，不能提交到版本库。
 
 ## 🎯 使用场景
 

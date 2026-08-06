@@ -4,8 +4,13 @@
 提供通用的推送服务接口，支持多种推送方式的扩展
 """
 
+import base64
+import hashlib
+import hmac
 import json
 import logging
+import time
+
 import requests
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
@@ -121,6 +126,113 @@ class DingTalkPushService(PushServiceBase):
         return self.send_message(test_message, title="钉钉推送测试")
 
 
+class FeishuPushService(PushServiceBase):
+    """飞书群自定义机器人推送服务。"""
+
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__(config)
+        self.webhook_url = config.get('webhook_url')
+        self.secret = config.get('secret')
+        self.link_url = config.get('link_url', 'http://127.0.0.1:5080')
+
+        if not self.webhook_url:
+            logger.warning("飞书 webhook 地址未配置")
+
+    def _build_signature(self) -> Dict[str, str]:
+        """Build the optional signature required by Feishu webhook security."""
+        if not self.secret:
+            return {}
+
+        timestamp = str(int(time.time()))
+        string_to_sign = f'{timestamp}\n{self.secret}'
+        signature = base64.b64encode(
+            hmac.new(
+                key=string_to_sign.encode('utf-8'),
+                msg=b'',
+                digestmod=hashlib.sha256,
+            ).digest()
+        ).decode('utf-8')
+        return {'timestamp': timestamp, 'sign': signature}
+
+    def send_message(self, message: str, use_markdown: bool = True, **kwargs) -> bool:
+        """发送飞书消息卡片，保留项目现有 Markdown 快报格式。"""
+        if not self.webhook_url:
+            logger.error("飞书 webhook 地址未配置，无法发送消息")
+            return False
+
+        title = kwargs.get('title', '黄金价格播报')
+        if use_markdown:
+            data = {
+                'msg_type': 'interactive',
+                'card': {
+                    'schema': '2.0',
+                    'header': {
+                        'title': {'tag': 'plain_text', 'content': title},
+                        'template': 'blue',
+                    },
+                    'body': {
+                        'direction': 'vertical',
+                        'padding': '12px 12px 12px 12px',
+                        'elements': [
+                            {
+                                'tag': 'markdown',
+                                'content': message,
+                                'text_align': 'left',
+                                'text_size': 'normal_v2',
+                                'margin': '0px 0px 0px 0px',
+                            }
+                        ],
+                    },
+                },
+            }
+        else:
+            data = {
+                'msg_type': 'text',
+                'content': {'text': message},
+            }
+
+        data.update(self._build_signature())
+
+        try:
+            response = requests.post(
+                self.webhook_url,
+                headers={'Content-Type': 'application/json'},
+                json=data,
+                timeout=10,
+            )
+            if response.status_code != 200:
+                logger.error("飞书消息发送失败: HTTP %s", response.status_code)
+                return False
+
+            result = response.json()
+            status_code = result.get('StatusCode', result.get('code'))
+            if status_code == 0:
+                logger.info("飞书消息发送成功")
+                return True
+
+            error_message = result.get('StatusMessage', result.get('msg', result))
+            logger.error("飞书消息发送失败: %s", error_message)
+            return False
+        except Exception as e:
+            logger.error("发送飞书消息异常: %s", e)
+            return False
+
+    def test_connection(self) -> bool:
+        """测试飞书连接。"""
+        test_message = f"""# 🧪 飞书推送测试消息
+
+**⏰ 测试时间:** {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S')}（Asia/Shanghai）
+
+**🔧 功能:** 黄金价格推送服务
+
+**✅ 状态:** 连接正常
+
+如果您收到此消息，说明飞书推送功能配置成功！
+
+🔗 [管理界面]({self.link_url})"""
+        return self.send_message(test_message, title='飞书推送测试')
+
+
 class PushServiceManager:
     """推送服务管理器"""
 
@@ -150,20 +262,42 @@ class PushServiceManager:
         return service
 
     def send_message(self, message: str, service_name: Optional[str] = None, **kwargs) -> bool:
-        """通过指定服务发送消息"""
-        service = self.get_service(service_name)
-        if not service:
+        """发送消息；未指定渠道时广播到全部已注册服务。"""
+        if service_name:
+            service = self.get_service(service_name)
+            return bool(service and service.send_message(message, **kwargs))
+
+        if not self.services:
+            logger.error("没有已配置的推送服务")
             return False
 
-        return service.send_message(message, **kwargs)
+        results = {
+            name: service.send_message(message, **kwargs)
+            for name, service in self.services.items()
+        }
+        failed_services = [name for name, success in results.items() if not success]
+        if failed_services:
+            logger.error("以下推送服务发送失败: %s", ', '.join(failed_services))
+        return all(results.values())
 
     def test_service(self, service_name: Optional[str] = None) -> bool:
-        """测试指定服务"""
-        service = self.get_service(service_name)
-        if not service:
+        """测试服务；未指定渠道时测试全部已注册服务。"""
+        if service_name:
+            service = self.get_service(service_name)
+            return bool(service and service.test_connection())
+
+        if not self.services:
+            logger.error("没有已配置的推送服务")
             return False
 
-        return service.test_connection()
+        results = {
+            name: service.test_connection()
+            for name, service in self.services.items()
+        }
+        failed_services = [name for name, success in results.items() if not success]
+        if failed_services:
+            logger.error("以下推送服务测试失败: %s", ', '.join(failed_services))
+        return all(results.values())
 
     def get_available_services(self) -> Dict[str, str]:
         """获取可用服务列表"""
@@ -271,19 +405,29 @@ def create_push_service_manager() -> PushServiceManager:
     """创建并配置推送服务管理器"""
     manager = PushServiceManager()
 
-    # 加载钉钉配置
-    try:
-        with open('dingtalk_config.json', 'r', encoding='utf-8') as f:
-            dingtalk_config = json.load(f)
+    service_configs = (
+        ('dingtalk', 'dingtalk_config.json', DingTalkPushService, '钉钉'),
+        ('feishu', 'feishu_config.json', FeishuPushService, '飞书'),
+    )
+    for name, filename, service_type, display_name in service_configs:
+        try:
+            with open(filename, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+        except FileNotFoundError:
+            logger.info("%s 配置文件不存在，跳过注册%s推送服务", filename, display_name)
+            continue
+        except Exception as e:
+            logger.error("加载%s配置失败: %s", display_name, e)
+            continue
 
-        # 注册钉钉推送服务
-        dingtalk_service = DingTalkPushService(dingtalk_config)
-        manager.register_service('dingtalk', dingtalk_service, is_default=True)
+        if not config.get('enabled', True):
+            logger.info("%s 推送已禁用", display_name)
+            continue
+        if not config.get('webhook_url'):
+            logger.warning("%s webhook 地址未配置，跳过注册%s推送服务", display_name, display_name)
+            continue
 
-    except FileNotFoundError:
-        logger.warning("钉钉配置文件不存在，跳过注册钉钉推送服务")
-    except Exception as e:
-        logger.error(f"加载钉钉配置失败: {e}")
+        manager.register_service(name, service_type(config), is_default=manager.default_service is None)
 
     return manager
 

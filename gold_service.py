@@ -347,25 +347,27 @@ def require_admin_token(view):
 
 class GoldService:
     def __init__(self):
-        config = self.load_dingtalk_config()
+        config = self.load_push_config()
         self.webhook_url = config.get('webhook_url') if config else None
         self.link_url = config.get('link_url', 'http://127.0.0.1:5080') if config else 'http://127.0.0.1:5080'
         self.push_manager = push_manager
         self._data_cache = {}
         self._cache_lock = threading.Lock()
 
-    def load_dingtalk_config(self):
-        """加载钉钉配置"""
-        try:
-            with open('dingtalk_config.json', 'r', encoding='utf-8') as f:
-                config = json.load(f)
-                return config
-        except FileNotFoundError:
-            logger.warning("钉钉配置文件不存在")
-            return None
-        except Exception as e:
-            logger.error(f"加载钉钉配置失败: {e}")
-            return None
+    def load_push_config(self):
+        """加载首个可用渠道配置，用于消息中的管理界面链接。"""
+        for filename in ('dingtalk_config.json', 'feishu_config.json'):
+            try:
+                with open(filename, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                if config.get('enabled', True) and config.get('webhook_url'):
+                    return config
+            except FileNotFoundError:
+                continue
+            except Exception as e:
+                logger.error("加载推送配置 %s 失败: %s", filename, e)
+        logger.warning("未找到可用的推送配置")
+        return None
 
     def _get_cached_data(self, cache_key, loader, ttl_seconds, on_refresh=None, force_refresh=False):
         """Return fresh cached data and serialize cache misses per process."""
@@ -2201,10 +2203,10 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # 检查配置文件
-    if not os.path.exists('dingtalk_config.json'):
+    if not os.path.exists('dingtalk_config.json') and not os.path.exists('feishu_config.json'):
         print("📝 首次运行，创建钉钉配置文件...")
         create_dingtalk_config()
-        print("⚠️  请编辑 dingtalk_config.json 配置钉钉webhook地址")
+        print("⚠️  请编辑 dingtalk_config.json 配置钉钉 webhook 地址，或使用 feishu_config.json 配置飞书")
 
     if args.scheduler_only:
         print("🔔 启动独立定时推送调度器...")

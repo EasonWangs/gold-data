@@ -1,0 +1,7 @@
+{
+  "enabled": true,
+  "webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_WEBHOOK_KEY",
+  "secret": "",
+  "link_url": "http://gold.neoxmind.com/",
+  "description": "飞书群自定义机器人配置；如启用了签名校验，请在 secret 中填写签名密钥"
+}

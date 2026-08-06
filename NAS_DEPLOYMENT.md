@@ -1,6 +1,6 @@
 # NAS Docker 部署
 
-本项目使用两个容器：`web` 提供网页和 API，`scheduler` 是唯一的钉钉定时推送进程。请不要额外启动第二个 `scheduler` 容器，否则同一时点可能重复推送。
+本项目使用两个容器：`web` 提供网页和 API，`scheduler` 是唯一的定时推送进程。请不要额外启动第二个 `scheduler` 容器，否则同一时点可能重复推送。
 
 ## 1. 准备配置
 
@@ -9,11 +9,12 @@
 ```bash
 cp .env.example .env
 cp dingtalk_config.example.json dingtalk_config.json
+cp feishu_config.example.json feishu_config.json
 ```
 
-编辑 `.env`，将 `GOLD_ADMIN_TOKEN` 改为高强度随机值；编辑 `dingtalk_config.json`，填入机器人 Webhook，并将 `link_url` 改为用户可以访问的实际域名或 NAS 地址。
+编辑 `.env`，将 `GOLD_ADMIN_TOKEN` 改为高强度随机值；编辑 `dingtalk_config.json` 和 `feishu_config.json`，填入需要使用的机器人 Webhook，并将 `link_url` 改为用户可以访问的实际域名或 NAS 地址。未使用的渠道请将配置中的 `enabled` 设为 `false`。
 
-这两个文件均不应提交至版本库。已有可用的 `dingtalk_config.json` 时，直接复制它到 NAS 项目目录即可。
+两个机器人配置文件均不应提交至版本库。已有可用配置时，直接复制它到 NAS 项目目录即可。
 
 ## 2. 构建并启动
 
@@ -33,7 +34,7 @@ docker compose logs -f web
 GOLD_HOST_PORT=127.0.0.1:5080
 ```
 
-然后把反向代理的上游设为 `http://127.0.0.1:5080`，并将 `dingtalk_config.json` 的 `link_url` 改为 HTTPS 域名。若反向代理运行在另一个 Docker 容器中，不要使用 `127.0.0.1`；应把两个服务加入同一 Docker 网络，并以服务名访问。
+然后把反向代理的上游设为 `http://127.0.0.1:5080`，并将已启用渠道配置中的 `link_url` 改为 HTTPS 域名。若反向代理运行在另一个 Docker 容器中，不要使用 `127.0.0.1`；应把两个服务加入同一 Docker 网络，并以服务名访问。
 
 若前端必须从不同域名直接访问 API，在 NAS 的 `.env` 中配置前端页面的实际来源（不是 API 地址）：
 

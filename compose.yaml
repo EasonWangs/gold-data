@@ -14,6 +14,7 @@ services:
       - "${GOLD_HOST_PORT:-5080}:5080"
     volumes:
       - ./dingtalk_config.json:/app/dingtalk_config.json:ro
+      - ./feishu_config.json:/app/feishu_config.json:ro
     healthcheck:
       test:
         - CMD
@@ -36,6 +37,7 @@ services:
     command: ["python", "gold_service.py", "--scheduler-only"]
     volumes:
       - ./dingtalk_config.json:/app/dingtalk_config.json:ro
+      - ./feishu_config.json:/app/feishu_config.json:ro
     depends_on:
       web:
         condition: service_healthy

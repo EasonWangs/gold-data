@@ -1,10 +1,10 @@
-# 钉钉推送说明
+# 钉钉与飞书推送说明
 
-服务通过钉钉自定义机器人发送上金所 `Au99.99` 行情快报。推送使用独立调度进程；Web/API 进程不会启动、停止或汇报该进程的实时存活状态，避免多 Worker 重复推送。
+服务通过钉钉和飞书群自定义机器人发送上金所 `Au99.99` 行情快报。可同时启用两个渠道；推送使用独立调度进程，Web/API 进程不会启动、停止或汇报该进程的实时存活状态，避免多 Worker 重复推送。
 
 ## 配置与启动
 
-首次运行会生成 `dingtalk_config.json`。填入机器人 Webhook，并在运行服务的环境中设置管理令牌：
+首次运行会生成 `dingtalk_config.json`；飞书请由 `feishu_config.example.json` 复制生成 `feishu_config.json`。填入已启用渠道的机器人 Webhook，并在运行服务的环境中设置管理令牌：
 
 ```bash
 export GOLD_ADMIN_TOKEN='请替换为随机且足够长的令牌'

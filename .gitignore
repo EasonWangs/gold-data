@@ -181,4 +181,5 @@ cython_debug/
 .cursorindexingignore
 /.idea
 dingtalk_config.json
+feishu_config.json
 .DS_Store
