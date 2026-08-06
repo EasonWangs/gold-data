@@ -93,7 +93,8 @@ SGE_SESSION_SCHEDULE = (
 SCHEDULED_PUSH_TIMES = {
     # Give the upstream minute feed time to publish the session's first quote.
     '09:02': ('day_opening', '日盘开盘', lambda: gold_service.push_opening_price()),
-    '16:02': ('daily_settlement', '日线收盘', lambda: gold_service.push_closing_price()),
+    '13:32': ('afternoon_opening', '午盘开盘', lambda: gold_service.push_afternoon_opening_price()),
+    '15:32': ('daily_settlement', '日线收盘', lambda: gold_service.push_closing_price()),
     '20:02': ('night_opening', '夜盘开盘', lambda: gold_service.push_night_opening_price()),
 }
 SCHEDULER_CONTROL_MESSAGE = (
@@ -598,6 +599,10 @@ class GoldService:
         """推送日盘首个有效报价（09:00–09:05）。"""
         return self._push_session_opening_price(clock_time(9), '日盘')
 
+    def push_afternoon_opening_price(self):
+        """推送午盘首个有效报价（13:30–13:35）。"""
+        return self._push_session_opening_price(clock_time(13, 30), '午盘')
+
     def push_night_opening_price(self):
         """推送夜盘首个有效报价（20:00–20:05）。"""
         return self._push_session_opening_price(clock_time(20), '夜盘')
@@ -806,7 +811,7 @@ class GoldService:
         Before the source publishes the current official daily bar, compose a
         provisional bar from same-trading-day realtime ticks, matching the
         front end.  This is deliberately separate from the simulated close
-        push: the 16:02 settlement push keeps using only official daily OHLC.
+        push: the 15:32 settlement push keeps using only official daily OHLC.
         A ``None`` result means the check completed without a KDJ crossover.
         """
         logger.info('开始检查当前交易日的 KDJ 策略信号...')
@@ -2015,7 +2020,8 @@ def api_service_status():
         'message': '定时推送由独立调度进程管理，Web Worker 不提供其运行状态',
         'scheduled_pushes': {
             'day_opening': '工作日 09:02（取 09:00–09:05 首个有效报价）',
-            'daily_settlement': '工作日 16:02（仅官方当日完整日线已发布时发送）',
+            'afternoon_opening': '工作日 13:32（取 13:30–13:35 首个有效报价）',
+            'daily_settlement': '工作日 15:32（仅官方当日完整日线已发布时发送）',
             'night_opening': '工作日 20:02（归属下一交易日，取 20:00–20:05 首个有效报价）',
         },
         'market': get_sge_session_status(),
@@ -2150,7 +2156,7 @@ def api_info():
             'gold_api': '上金所 Au99.99 实时分时与交易日日线',
             'silver_api': '上金所 Ag99.99 实时分时与交易日日线',
             'strategy_backtest': '后端日线策略回测与最新信号输出',
-            'dingtalk_push': '日盘、日线收盘、夜盘三个时点的钉钉快报',
+            'dingtalk_push': '日盘、午盘、日线收盘、夜盘四个时点的钉钉快报',
             'web_interface': 'Web管理界面'
         },
         'endpoints': {
@@ -2165,7 +2171,8 @@ def api_info():
         },
         'schedule': {
             'day_opening': '工作日 09:02',
-            'daily_settlement': '工作日 16:02',
+            'afternoon_opening': '工作日 13:32',
+            'daily_settlement': '工作日 15:32',
             'night_opening': '工作日 20:02（归属下一交易日）'
         },
         'data_source': DATA_SOURCE,

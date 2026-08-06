@@ -126,6 +126,12 @@ class SmaIndicatorApiTests(unittest.TestCase):
         self.assertEqual(body['market']['timezone'], 'Asia/Shanghai')
         self.assertIn('夜盘', body['market']['daily_bar_note'])
 
+    def test_scheduled_pushes_include_afternoon_opening_and_1532_settlement(self):
+        self.assertIn('13:32', gold_service.SCHEDULED_PUSH_TIMES)
+        self.assertEqual(gold_service.SCHEDULED_PUSH_TIMES['13:32'][0], 'afternoon_opening')
+        self.assertIn('15:32', gold_service.SCHEDULED_PUSH_TIMES)
+        self.assertNotIn('16:02', gold_service.SCHEDULED_PUSH_TIMES)
+
     def test_server_side_ma_backtest_executes_crosses_and_returns_latest_signal(self):
         result = gold_service.run_strategy_backtest(strategy_history(), strategy='ma5_20')
 
