@@ -213,6 +213,31 @@ body {
     margin-right: 10px;
 }
 
+.push-config-card > p {
+    color: #6c757d;
+    line-height: 1.55;
+    margin: 8px 0 16px;
+}
+
+.push-channel-form h5 {
+    color: #343a40;
+    font-size: 1rem;
+    margin-bottom: 12px;
+}
+
+.push-channel-form .form-control {
+    display: block;
+    margin: 10px 0 0;
+    width: 100%;
+}
+
+.channel-toggle {
+    align-items: center;
+    color: #495057;
+    display: flex;
+    gap: 8px;
+}
+
 .loading {
     text-align: center;
     padding: 40px;

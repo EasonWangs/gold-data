@@ -20,6 +20,10 @@ RUN python -m pip install --upgrade pip \
 
 COPY --chown=app:app . ./
 
+# A named volume mounted here inherits app ownership on first creation, so the
+# admin UI can persist webhook credentials without running the service as root.
+RUN mkdir -p /app/data && chown app:app /app/data
+
 USER app
 
 EXPOSE 5080

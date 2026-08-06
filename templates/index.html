@@ -178,7 +178,7 @@
                     </div>
                 </div>
 
-                <!-- 钉钉推送标签页 -->
+                <!-- 推送管理标签页 -->
                 <div v-if="activeTab === 'push'">
                     <div class="status status-running">
                         <h3>📊 定时推送</h3>
@@ -189,17 +189,52 @@
                         <h4>🔐 管理令牌</h4>
                         <input
                             v-model="adminToken"
+                            @change="loadPushConfig"
                             type="password"
                             class="form-control"
                             placeholder="输入 GOLD_ADMIN_TOKEN"
                             autocomplete="off"
                         >
-                        <p>令牌仅保存在当前浏览器内存中，用于手动和测试推送。</p>
+                        <p>令牌仅保存在当前浏览器内存中。输入或更新令牌后会自动读取服务端最新渠道状态。</p>
+                    </div>
+
+                    <div class="card push-config-card">
+                        <h4>⚙️ 推送渠道配置</h4>
+                        <p>Webhook 与飞书签名密钥仅保存到服务端的持久化数据卷，页面不会回显已有密钥；留空即可保留原值。页面刷新后会保留不含密钥的上次状态，输入令牌后自动同步最新状态。</p>
+                        <div class="grid">
+                            <div class="push-channel-form">
+                                <h5>钉钉机器人</h5>
+                                <label class="channel-toggle">
+                                    <input v-model="pushConfig.dingtalk.enabled" type="checkbox">
+                                    启用钉钉推送
+                                </label>
+                                <input v-model.trim="pushConfig.dingtalk.webhook_url" type="password" class="form-control" :placeholder="pushConfig.dingtalk.webhook_configured ? '已配置，留空不修改' : '钉钉 Webhook 地址'" autocomplete="new-password">
+                                <input v-model.trim="pushConfig.dingtalk.link_url" type="url" class="form-control" placeholder="管理界面链接（可选）">
+                            </div>
+                            <div class="push-channel-form">
+                                <h5>飞书群机器人</h5>
+                                <label class="channel-toggle">
+                                    <input v-model="pushConfig.feishu.enabled" type="checkbox">
+                                    启用飞书推送
+                                </label>
+                                <input v-model.trim="pushConfig.feishu.webhook_url" type="password" class="form-control" :placeholder="pushConfig.feishu.webhook_configured ? '已配置，留空不修改' : '飞书 Webhook 地址'" autocomplete="new-password">
+                                <input v-model.trim="pushConfig.feishu.secret" type="password" class="form-control" :placeholder="pushConfig.feishu.secret_configured ? '签名密钥已配置，留空不修改' : '飞书签名密钥（可选）'" autocomplete="new-password">
+                                <input v-model.trim="pushConfig.feishu.link_url" type="url" class="form-control" placeholder="管理界面链接（可选）">
+                            </div>
+                        </div>
+                        <button class="btn" @click="loadPushConfig" :disabled="loading.pushConfig || !adminToken">读取渠道配置</button>
+                        <button class="btn btn-success" @click="savePushConfig" :disabled="loading.pushConfig || !adminToken">保存渠道配置</button>
+                        <div v-if="pushConfigMessage" :class="pushConfigMessage.type === 'success' ? 'success' : 'error'">
+                            {{ pushConfigMessage.text }}
+                        </div>
                     </div>
 
                     <div style="text-align: center; margin: 30px 0;">
                         <button class="btn btn-warning" @click="testPush" :disabled="loading.push || !adminToken">
-                            🧪 测试推送
+                            🧪 测试所有已启用渠道
+                        </button>
+                        <button class="btn" @click="testFeishuPush" :disabled="loading.push || !adminToken">
+                            🪽 测试飞书推送
                         </button>
                         <button class="btn" @click="pushOpening" :disabled="loading.push || !adminToken">
                             📈 手动推送开盘价
@@ -281,6 +316,7 @@ curl -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/service/sta
 
 # 测试及手动推送
 curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/push/test
+curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/push/test/feishu
 curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/push/opening
 curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" 'http://localhost:5080/api/push/closing?mode=latest'
 curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/push/kdj-signal

@@ -14,9 +14,7 @@
 
 ```bash
 cp .env.example .env
-cp dingtalk_config.example.json dingtalk_config.json
-cp feishu_config.example.json feishu_config.json
-# 编辑 .env 和各渠道配置；不使用的渠道可将 enabled 设为 false
+# 编辑 .env，设置高强度 GOLD_ADMIN_TOKEN
 docker compose up -d --build
 ```
 
@@ -46,10 +44,10 @@ python gold_service.py --scheduler-only
 ```
 
 ### 配置推送渠道
-1. 复制所需渠道的示例配置；Docker 部署时两个配置文件都需存在，未使用的渠道请设置 `"enabled": false`。
-2. 在 `dingtalk_config.json` 或 `feishu_config.json` 填入机器人 Webhook。
-3. 设置管理令牌（请使用随机且足够长的值）：`export GOLD_ADMIN_TOKEN='请替换为随机令牌'`。
-4. 重启服务生效。已启用的钉钉与飞书渠道会同时收到推送。
+1. 设置管理令牌（请使用随机且足够长的值）：`export GOLD_ADMIN_TOKEN='请替换为随机令牌'`。
+2. 打开后台的「推送管理」，输入管理令牌后点击「读取渠道配置」。
+3. 填入钉钉或飞书 Webhook，勾选对应渠道并保存；飞书若启用签名校验，再填入签名密钥。
+4. 保存后立即生效；调度器会在下一次推送前读取最新配置，无需重启。
 
 ## 🌟 核心功能
 
@@ -248,8 +246,11 @@ curl http://localhost:5080/api/silver/spot_hist_sge?days=5
 # 先在服务端设置 GOLD_ADMIN_TOKEN；所有管理接口均需此请求头
 export GOLD_ADMIN_TOKEN='请替换为随机令牌'
 
-# 测试钉钉推送
+# 测试所有已启用的推送渠道
 curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/push/test
+
+# 仅测试飞书推送（飞书未配置或禁用时返回 409）
+curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/push/test/feishu
 
 # 手动推送开盘价
 curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/push/opening
@@ -275,36 +276,14 @@ curl -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/service/sta
 4. 选择安全设置（建议选择 **自定义关键词**，添加关键词如："黄金"、"价格"）
 5. 复制生成的 **Webhook地址**
 
-### 配置服务
-首次运行会自动创建 `dingtalk_config.json`：
-```json
-{
-  "webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=YOUR_ACCESS_TOKEN",
-  "description": "请将YOUR_ACCESS_TOKEN替换为您的钉钉机器人access_token"
-}
-```
-
-编辑配置文件，将 `YOUR_ACCESS_TOKEN` 替换为实际的token。
+创建后，在后台「推送管理 → 推送渠道配置」中粘贴 Webhook，勾选“启用钉钉推送”并保存。
 
 ### 创建飞书机器人
 1. 在目标飞书群中进入 **群设置** → **群机器人** → **添加机器人**。
 2. 选择 **自定义机器人**，复制生成的 Webhook 地址。
-3. 复制并编辑配置文件：
+3. 在后台「推送管理 → 推送渠道配置」中粘贴 Webhook，勾选“启用飞书推送”并保存。
 
-```bash
-cp feishu_config.example.json feishu_config.json
-```
-
-```json
-{
-  "enabled": true,
-  "webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_WEBHOOK_KEY",
-  "secret": "",
-  "link_url": "https://gold.example.com/"
-}
-```
-
-如果飞书机器人启用了“签名校验”，将对应的签名密钥填入 `secret`；未启用时保持为空。飞书使用消息卡片推送，因此现有行情快报的 Markdown 格式和链接会保留。配置文件均含有机器人密钥，已默认忽略，不能提交到版本库。
+如果飞书机器人启用了“签名校验”，将对应密钥填入后台的“飞书签名密钥”；未启用时留空。飞书使用消息卡片推送，因此现有行情快报的 Markdown 格式和链接会保留。Webhook 与密钥仅保存在服务端数据卷中，管理页面不会回显。
 
 ## 🎯 使用场景
 
@@ -356,7 +335,7 @@ cp feishu_config.example.json feishu_config.json
 |------|--------|------|
 | **后端** | Flask + akshare + schedule | Web框架 + 数据获取 + 定时任务 |
 | **前端** | 原生JS + CSS3 | 响应式Web界面 |
-| **推送** | 钉钉机器人API | 消息推送服务 |
+| **推送** | 钉钉、飞书机器人 API | 消息推送服务 |
 | **部署** | 单文件运行 | 无复杂依赖 |
 
 ## 📁 项目结构
@@ -364,7 +343,7 @@ cp feishu_config.example.json feishu_config.json
 ```
 📦 gold-Date/
 ├── 🏅 gold_service.py          # 主服务程序（唯一运行文件）
-├── ⚙️ dingtalk_config.json     # 钉钉配置文件
+├── 📁 data/push_channels.json  # 后台自动生成的渠道配置（不回显密钥）
 ├── 📋 requirements.txt         # 依赖包列表
 └── 📖 README.md               # 项目文档
 ```
@@ -375,8 +354,8 @@ cp feishu_config.example.json feishu_config.json
 
 | 项目 | 说明 |
 |------|------|
-| 🌐 **网络要求** | 确保能访问钉钉 API 与 AkShare 可用的上金所行情源 |
-| ⚙️ **配置检查** | 首次使用需配置钉钉webhook地址 |
+| 🌐 **网络要求** | 确保能访问已启用的钉钉或飞书 API 与 AkShare 可用的上金所行情源 |
+| ⚙️ **配置检查** | 首次使用请在后台填写机器人 Webhook 地址 |
 | 🔐 **管理令牌** | 必须设置 `GOLD_ADMIN_TOKEN` 才能手动或测试推送 |
 | ⏰ **时区设置** | 推送时间固定使用 Asia/Shanghai（09:02 / 16:02 / 20:02） |
 | 📅 **工作日历** | 周末不调度；法定节假日由源站实际行情和完整日线二次确认 |

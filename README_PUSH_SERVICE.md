@@ -4,7 +4,7 @@
 
 ## 配置与启动
 
-首次运行会生成 `dingtalk_config.json`；飞书请由 `feishu_config.example.json` 复制生成 `feishu_config.json`。填入已启用渠道的机器人 Webhook，并在运行服务的环境中设置管理令牌：
+首次运行后，在管理后台的「推送管理 → 推送渠道配置」中填写钉钉或飞书 Webhook；Webhook 和飞书签名密钥只保存在服务端数据卷，不会回显。运行服务的环境仍需设置管理令牌：
 
 ```bash
 export GOLD_ADMIN_TOKEN='请替换为随机且足够长的令牌'
@@ -34,6 +34,9 @@ export GOLD_ADMIN_TOKEN='请替换为随机且足够长的令牌'
 
 # 测试机器人连接
 curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://127.0.0.1:5080/api/push/test
+
+# 仅测试飞书机器人（飞书未配置或禁用时返回 HTTP 409）
+curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://127.0.0.1:5080/api/push/test/feishu
 
 # 手动发送开盘价、夜盘开盘价、“最新已发布日线”的模拟收盘快报，
 # 或只在最新日线触发 KDJ 交叉时发送策略消息

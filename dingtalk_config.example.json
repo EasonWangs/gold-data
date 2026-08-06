@@ -1,5 +1,0 @@
-{
-  "webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=YOUR_ACCESS_TOKEN",
-  "link_url": "http://gold.neoxmind.com/",
-  "description": "钉钉机器人配置；请复制为 dingtalk_config.json 后填写真实值"
-}

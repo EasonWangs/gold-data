@@ -1,5 +1,6 @@
 // 黄金价格服务前端应用
 const { createApp } = Vue;
+const PUSH_CONFIG_CACHE_KEY = 'gold-push-channel-state';
 
 createApp({
     data() {
@@ -7,7 +8,7 @@ createApp({
             activeTab: 'price',
             tabs: [
                 { id: 'price', name: '📊 价格数据' },
-                { id: 'push', name: '🔔 钉钉推送' },
+                { id: 'push', name: '🔔 推送管理' },
                 { id: 'api', name: '🔌 API文档' }
             ],
             loading: {
@@ -15,7 +16,8 @@ createApp({
                 history: false,
                 silverRealtime: false,
                 silverHistory: false,
-                push: false
+                push: false,
+                pushConfig: false
             },
             realtimeData: null,
             realtimeResponse: null,
@@ -30,10 +32,28 @@ createApp({
             silverHistoryDays: 5,
             silverHistoryError: null,
             adminToken: '',
-            pushMessage: null
+            pushMessage: null,
+            pushConfigMessage: null,
+            pushConfig: {
+                dingtalk: {
+                    enabled: false,
+                    webhook_url: '',
+                    webhook_configured: false,
+                    link_url: ''
+                },
+                feishu: {
+                    enabled: false,
+                    webhook_url: '',
+                    webhook_configured: false,
+                    secret: '',
+                    secret_configured: false,
+                    link_url: ''
+                }
+            }
         }
     },
     mounted() {
+        this.restoreCachedPushConfig();
     },
     methods: {
         adminRequestConfig() {
@@ -42,6 +62,25 @@ createApp({
                     'X-Admin-Token': this.adminToken
                 }
             };
+        },
+
+        cachePushConfig(channels) {
+            try {
+                sessionStorage.setItem(PUSH_CONFIG_CACHE_KEY, JSON.stringify(channels));
+            } catch {
+                // Private browsing or browser policy can disable session storage.
+            }
+        },
+
+        restoreCachedPushConfig() {
+            try {
+                const cached = sessionStorage.getItem(PUSH_CONFIG_CACHE_KEY);
+                if (cached) {
+                    this.applyPushConfig(JSON.parse(cached));
+                }
+            } catch {
+                // Ignore malformed or unavailable browser storage.
+            }
         },
 
         async refreshRealTimePrice() {
@@ -119,7 +158,61 @@ createApp({
         },
 
         async testPush() {
-            await this.performPush('/api/push/test', '测试推送');
+            await this.performPush('/api/push/test', '测试所有已启用渠道');
+        },
+
+        applyPushConfig(channels) {
+            this.pushConfig = {
+                dingtalk: {
+                    ...channels.dingtalk,
+                    webhook_url: ''
+                },
+                feishu: {
+                    ...channels.feishu,
+                    webhook_url: '',
+                    secret: ''
+                }
+            };
+            this.cachePushConfig(channels);
+        },
+
+        async loadPushConfig() {
+            if (!this.adminToken) return;
+            this.loading.pushConfig = true;
+            this.pushConfigMessage = null;
+            try {
+                const response = await axios.get('/api/push/config', this.adminRequestConfig());
+                this.applyPushConfig(response.data.channels);
+                this.pushConfigMessage = { type: 'success', text: '渠道配置已读取；密钥不会显示，请留空以保持原值。' };
+            } catch (error) {
+                this.pushConfigMessage = {
+                    type: 'error',
+                    text: '读取渠道配置失败: ' + (error.response?.data?.message || error.message)
+                };
+            } finally {
+                this.loading.pushConfig = false;
+            }
+        },
+
+        async savePushConfig() {
+            this.loading.pushConfig = true;
+            this.pushConfigMessage = null;
+            try {
+                const response = await axios.put('/api/push/config', this.pushConfig, this.adminRequestConfig());
+                this.applyPushConfig(response.data.channels);
+                this.pushConfigMessage = { type: 'success', text: response.data.message };
+            } catch (error) {
+                this.pushConfigMessage = {
+                    type: 'error',
+                    text: '保存渠道配置失败: ' + (error.response?.data?.message || error.message)
+                };
+            } finally {
+                this.loading.pushConfig = false;
+            }
+        },
+
+        async testFeishuPush() {
+            await this.performPush('/api/push/test/feishu', '测试飞书推送');
         },
 
         async pushOpening() {

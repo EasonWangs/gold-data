@@ -182,4 +182,5 @@ cython_debug/
 /.idea
 dingtalk_config.json
 feishu_config.json
+data/
 .DS_Store

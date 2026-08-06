@@ -7,7 +7,6 @@
 import akshare as ak
 import pandas as pd
 import requests
-import json
 import schedule
 import time
 import threading
@@ -20,7 +19,13 @@ from functools import wraps
 from flask import Flask, jsonify, request
 from datetime import datetime, time as clock_time, timedelta
 from zoneinfo import ZoneInfo
-from push_service import push_manager, MessageTemplate
+from push_service import (
+    MessageTemplate,
+    primary_link_url,
+    public_channel_configs,
+    push_manager,
+    update_channel_configs,
+)
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -122,7 +127,7 @@ def add_configured_cors_headers(response):
         return response
 
     response.headers['Access-Control-Allow-Origin'] = origin
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, OPTIONS'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Admin-Token'
 
     existing_vary = response.headers.get('Vary', '')
@@ -348,27 +353,15 @@ def require_admin_token(view):
 
 class GoldService:
     def __init__(self):
-        config = self.load_push_config()
-        self.webhook_url = config.get('webhook_url') if config else None
-        self.link_url = config.get('link_url', 'http://127.0.0.1:5080') if config else 'http://127.0.0.1:5080'
+        self.webhook_url = None
+        self.link_url = primary_link_url()
         self.push_manager = push_manager
         self._data_cache = {}
         self._cache_lock = threading.Lock()
 
-    def load_push_config(self):
-        """加载首个可用渠道配置，用于消息中的管理界面链接。"""
-        for filename in ('dingtalk_config.json', 'feishu_config.json'):
-            try:
-                with open(filename, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                if config.get('enabled', True) and config.get('webhook_url'):
-                    return config
-            except FileNotFoundError:
-                continue
-            except Exception as e:
-                logger.error("加载推送配置 %s 失败: %s", filename, e)
-        logger.warning("未找到可用的推送配置")
-        return None
+    def refresh_push_link_url(self):
+        """Refresh the URL embedded in market messages from admin settings."""
+        self.link_url = primary_link_url()
 
     def _get_cached_data(self, cache_key, loader, ttl_seconds, on_refresh=None, force_refresh=False):
         """Return fresh cached data and serialize cache misses per process."""
@@ -484,6 +477,7 @@ class GoldService:
 
     def send_message(self, message, service_name=None, **kwargs):
         """通过推送服务发送消息"""
+        self.refresh_push_link_url()
         return self.push_manager.send_message(message, service_name, **kwargs)
 
     def is_trading_day(self):
@@ -862,10 +856,10 @@ class GoldService:
             return None, f'{bar_label}（{trading_date.isoformat()}）未触发 KDJ 买入或卖出，未发送推送'
         return False, 'KDJ 策略推送发送失败'
 
-    def test_push(self):
-        """测试推送功能"""
-        logger.info("测试推送功能...")
-        result = self.push_manager.test_service()
+    def test_push(self, service_name=None):
+        """测试指定渠道；未指定时测试全部已启用渠道。"""
+        logger.info("测试推送功能%s...", f'（{service_name}）' if service_name else '')
+        result = self.push_manager.test_service(service_name)
         if result:
             logger.info("✅ 推送测试成功")
             self._record_successful_push()
@@ -2040,23 +2034,60 @@ def api_stop_service():
     """In-process scheduler control is unsafe with multi-worker WSGI."""
     return scheduler_control_response()
 
+
+@app.route('/api/push/config', methods=['GET', 'PUT'])
+@require_admin_token
+def api_push_config():
+    """Read non-secret channel state or persist admin-entered channel settings."""
+    if request.method == 'GET':
+        return jsonify({
+            'status': 'success',
+            'channels': public_channel_configs(),
+            'timestamp': market_timestamp(),
+        })
+
+    changes = request.get_json(silent=True)
+    try:
+        update_channel_configs(changes)
+        gold_service.refresh_push_link_url()
+        logger.info('推送渠道配置已由管理后台更新')
+        return jsonify({
+            'status': 'success',
+            'message': '推送渠道配置已保存',
+            'channels': public_channel_configs(),
+            'timestamp': market_timestamp(),
+        })
+    except ValueError as error:
+        return jsonify({
+            'status': 'error',
+            'message': str(error),
+            'timestamp': market_timestamp(),
+        }), 400
+    except Exception as error:
+        logger.exception('保存推送渠道配置失败')
+        return jsonify({
+            'status': 'error',
+            'message': f'保存推送渠道配置失败: {error}',
+            'timestamp': market_timestamp(),
+        }), 500
+
 @app.route('/api/push/test', methods=['POST'])
 @require_admin_token
 def api_test_push():
-    """测试推送"""
+    """测试所有已启用的推送渠道。"""
     try:
         result = gold_service.test_push()
 
         if result:
             return jsonify({
                 'status': 'success',
-                'message': '测试推送发送成功',
+                'message': '已启用渠道测试推送发送成功',
                 'timestamp': market_timestamp()
             })
         else:
             return jsonify({
                 'status': 'error',
-                'message': '测试推送发送失败',
+                'message': '已启用渠道测试推送发送失败',
                 'timestamp': market_timestamp()
             }), 500
 
@@ -2066,6 +2097,39 @@ def api_test_push():
             'status': 'error',
             'message': f'测试推送失败: {str(e)}',
             'timestamp': market_timestamp()
+        }), 500
+
+
+@app.route('/api/push/test/feishu', methods=['POST'])
+@require_admin_token
+def api_test_feishu_push():
+    """仅测试飞书推送渠道。"""
+    if not gold_service.push_manager.get_service('feishu'):
+        return jsonify({
+            'status': 'error',
+            'message': '飞书推送未配置或已禁用',
+            'timestamp': market_timestamp(),
+        }), 409
+
+    try:
+        result = gold_service.test_push(service_name='feishu')
+        if result:
+            return jsonify({
+                'status': 'success',
+                'message': '飞书测试推送发送成功',
+                'timestamp': market_timestamp(),
+            })
+        return jsonify({
+            'status': 'error',
+            'message': '飞书测试推送发送失败',
+            'timestamp': market_timestamp(),
+        }), 502
+    except Exception as e:
+        logger.exception('飞书测试推送失败')
+        return jsonify({
+            'status': 'error',
+            'message': f'飞书测试推送失败: {str(e)}',
+            'timestamp': market_timestamp(),
         }), 500
 
 @app.route('/api/push/opening', methods=['POST'])
@@ -2183,23 +2247,6 @@ def api_info():
         }
     })
 
-def create_dingtalk_config():
-    """创建钉钉配置文件"""
-    config = {
-        "webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=YOUR_ACCESS_TOKEN",
-        "link_url": "http://gold.neoxmind.com/",
-        "description": "钉钉机器人配置文件"
-    }
-
-    try:
-        with open('dingtalk_config.json', 'w', encoding='utf-8') as f:
-            json.dump(config, f, ensure_ascii=False, indent=2)
-        print("✅ 钉钉配置文件已创建: dingtalk_config.json")
-        return True
-    except Exception as e:
-        print(f"❌ 创建配置文件失败: {e}")
-        return False
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='黄金价格服务')
     parser.add_argument(
@@ -2209,11 +2256,7 @@ if __name__ == '__main__':
     )
     args = parser.parse_args()
 
-    # 检查配置文件
-    if not os.path.exists('dingtalk_config.json') and not os.path.exists('feishu_config.json'):
-        print("📝 首次运行，创建钉钉配置文件...")
-        create_dingtalk_config()
-        print("⚠️  请编辑 dingtalk_config.json 配置钉钉 webhook 地址，或使用 feishu_config.json 配置飞书")
+    print("⚙️  请通过管理后台的“推送渠道配置”填写钉钉或飞书 Webhook 地址")
 
     if args.scheduler_only:
         print("🔔 启动独立定时推送调度器...")

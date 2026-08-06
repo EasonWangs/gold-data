@@ -17,6 +17,8 @@ from push_service import (  # noqa: E402
     FeishuPushService,
     PushServiceManager,
     create_push_service_manager,
+    public_channel_configs,
+    update_channel_configs,
 )
 
 
@@ -67,21 +69,64 @@ class FeishuPushServiceTests(unittest.TestCase):
 class PushServiceManagerTests(unittest.TestCase):
     def test_factory_registers_enabled_feishu_channel(self):
         with tempfile.TemporaryDirectory() as directory:
-            config_path = Path(directory) / 'feishu_config.json'
+            config_path = Path(directory) / 'push_channels.json'
             config_path.write_text(json.dumps({
-                'enabled': True,
-                'webhook_url': 'https://open.feishu.cn/open-apis/bot/v2/hook/test',
+                'feishu': {
+                    'enabled': True,
+                    'webhook_url': 'https://open.feishu.cn/open-apis/bot/v2/hook/test',
+                },
             }), encoding='utf-8')
-            previous_directory = os.getcwd()
-            try:
-                os.chdir(directory)
+            with patch.dict(os.environ, {'GOLD_PUSH_CONFIG_PATH': str(config_path)}):
                 manager = create_push_service_manager()
-            finally:
-                os.chdir(previous_directory)
+                self.assertEqual(manager.get_available_services(), {
+                    'feishu': 'FeishuPushService',
+                })
 
-        self.assertEqual(manager.get_available_services(), {
-            'feishu': 'FeishuPushService',
-        })
+    def test_admin_config_persists_secrets_without_returning_them(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / 'push_channels.json'
+            with patch.dict(os.environ, {'GOLD_PUSH_CONFIG_PATH': str(config_path)}):
+                update_channel_configs({
+                    'dingtalk': {
+                        'enabled': True,
+                        'webhook_url': 'https://oapi.dingtalk.com/robot/send?access_token=test',
+                        'link_url': 'https://gold.example.com',
+                    },
+                    'feishu': {
+                        'enabled': True,
+                        'webhook_url': 'https://open.feishu.cn/open-apis/bot/v2/hook/test',
+                        'secret': 'feishu-secret',
+                        'link_url': 'https://gold.example.com',
+                    },
+                })
+                public_config = public_channel_configs()
+                manager = create_push_service_manager()
+
+                self.assertTrue(config_path.exists())
+                self.assertEqual(config_path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(public_config['dingtalk']['link_url'], 'https://gold.example.com')
+                self.assertTrue(public_config['dingtalk']['webhook_configured'])
+                self.assertTrue(public_config['feishu']['webhook_configured'])
+                self.assertTrue(public_config['feishu']['secret_configured'])
+                self.assertNotIn('webhook_url', public_config['dingtalk'])
+                self.assertNotIn('secret', public_config['feishu'])
+                self.assertEqual(set(manager.get_available_services()), {'dingtalk', 'feishu'})
+
+    def test_runtime_config_is_reloaded_before_delivery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / 'push_channels.json'
+            with patch.dict(os.environ, {'GOLD_PUSH_CONFIG_PATH': str(config_path)}):
+                update_channel_configs({
+                    'feishu': {
+                        'enabled': True,
+                        'webhook_url': 'https://open.feishu.cn/open-apis/bot/v2/hook/test',
+                    },
+                })
+                manager = create_push_service_manager()
+                self.assertIn('feishu', manager.get_available_services())
+
+                update_channel_configs({'feishu': {'enabled': False}})
+                self.assertNotIn('feishu', manager.get_available_services())
 
     def test_unspecified_service_broadcasts_to_every_enabled_channel(self):
         manager = PushServiceManager()

@@ -9,15 +9,169 @@ import hashlib
 import hmac
 import json
 import logging
+import os
+import tempfile
 import time
 
 import requests
 from abc import ABC, abstractmethod
+from pathlib import Path
+from threading import RLock
 from typing import Dict, Any, Optional
+from urllib.parse import urlparse
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
+
+CHANNEL_NAMES = ('dingtalk', 'feishu')
+RUNTIME_CONFIG_PATH_ENV = 'GOLD_PUSH_CONFIG_PATH'
+DEFAULT_LINK_URL = 'http://127.0.0.1:5080'
+
+
+def runtime_config_path() -> Path:
+    """Return the server-owned persistence path for channel credentials."""
+    return Path(os.environ.get(RUNTIME_CONFIG_PATH_ENV, 'data/push_channels.json'))
+
+
+def _default_channel_configs() -> Dict[str, Dict[str, Any]]:
+    return {
+        'dingtalk': {
+            'enabled': False,
+            'webhook_url': '',
+            'link_url': DEFAULT_LINK_URL,
+        },
+        'feishu': {
+            'enabled': False,
+            'webhook_url': '',
+            'secret': '',
+            'link_url': DEFAULT_LINK_URL,
+        },
+    }
+
+
+def _merged_channel_configs(raw_config: Any) -> Dict[str, Dict[str, Any]]:
+    """Normalise persisted or legacy channel config without exposing secrets."""
+    configs = _default_channel_configs()
+    if not isinstance(raw_config, dict):
+        return configs
+
+    for name in CHANNEL_NAMES:
+        channel_config = raw_config.get(name)
+        if isinstance(channel_config, dict):
+            configs[name].update({
+                key: value
+                for key, value in channel_config.items()
+                if key in configs[name]
+            })
+    return configs
+
+
+def load_channel_configs() -> Dict[str, Dict[str, Any]]:
+    """Load server-owned runtime settings saved through the admin UI."""
+    config_path = runtime_config_path()
+    try:
+        with config_path.open('r', encoding='utf-8') as file:
+            return _merged_channel_configs(json.load(file))
+    except FileNotFoundError:
+        return _default_channel_configs()
+    except Exception as error:
+        logger.error("加载推送渠道配置失败: %s", error)
+        return _default_channel_configs()
+
+
+def _validate_url(value: str, field_name: str, allowed_schemes: set[str]) -> None:
+    parsed = urlparse(value)
+    if parsed.scheme not in allowed_schemes or not parsed.netloc:
+        raise ValueError(f'{field_name} 必须是有效的 {" / ".join(sorted(allowed_schemes))} 地址')
+
+
+def update_channel_configs(changes: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Merge, validate and atomically persist admin-provided channel settings."""
+    if not isinstance(changes, dict):
+        raise ValueError('请求体必须是 JSON 对象')
+
+    configs = load_channel_configs()
+    for name in CHANNEL_NAMES:
+        channel_changes = changes.get(name)
+        if channel_changes is None:
+            continue
+        if not isinstance(channel_changes, dict):
+            raise ValueError(f'{name} 配置必须是对象')
+
+        config = configs[name]
+        if 'enabled' in channel_changes:
+            if not isinstance(channel_changes['enabled'], bool):
+                raise ValueError(f'{name}.enabled 必须是布尔值')
+            config['enabled'] = channel_changes['enabled']
+
+        for key in ('webhook_url', 'link_url', 'secret'):
+            if key not in channel_changes or key not in config:
+                continue
+            value = channel_changes[key]
+            if not isinstance(value, str):
+                raise ValueError(f'{name}.{key} 必须是字符串')
+            if value:
+                if key == 'webhook_url':
+                    _validate_url(value, f'{name}.{key}', {'https'})
+                elif key == 'link_url':
+                    _validate_url(value, f'{name}.{key}', {'http', 'https'})
+                config[key] = value
+
+        for key in ('webhook_url', 'secret'):
+            if channel_changes.get(f'clear_{key}'):
+                config[key] = ''
+
+        if config['enabled'] and not config['webhook_url']:
+            raise ValueError(f'启用{name}推送前必须填写 Webhook 地址')
+
+    config_path = runtime_config_path()
+    config_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor, temporary_path = tempfile.mkstemp(
+        prefix='.push-channels-',
+        suffix='.json',
+        dir=config_path.parent,
+        text=True,
+    )
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as file:
+            json.dump(configs, file, ensure_ascii=False, indent=2)
+            file.write('\n')
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, config_path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.unlink(temporary_path)
+
+    return configs
+
+
+def public_channel_configs() -> Dict[str, Dict[str, Any]]:
+    """Expose editable non-secret metadata to the authenticated admin UI."""
+    configs = load_channel_configs()
+    return {
+        'dingtalk': {
+            'enabled': configs['dingtalk']['enabled'],
+            'webhook_configured': bool(configs['dingtalk']['webhook_url']),
+            'link_url': configs['dingtalk']['link_url'],
+        },
+        'feishu': {
+            'enabled': configs['feishu']['enabled'],
+            'webhook_configured': bool(configs['feishu']['webhook_url']),
+            'secret_configured': bool(configs['feishu']['secret']),
+            'link_url': configs['feishu']['link_url'],
+        },
+    }
+
+
+def primary_link_url() -> str:
+    """Return the first enabled channel's management URL for market messages."""
+    configs = load_channel_configs()
+    for name in CHANNEL_NAMES:
+        config = configs[name]
+        if config['enabled'] and config['webhook_url']:
+            return config['link_url']
+    return DEFAULT_LINK_URL
 
 
 class PushServiceBase(ABC):
@@ -236,44 +390,73 @@ class FeishuPushService(PushServiceBase):
 class PushServiceManager:
     """推送服务管理器"""
 
-    def __init__(self):
+    def __init__(self, config_loader=None):
         self.services: Dict[str, PushServiceBase] = {}
         self.default_service: Optional[str] = None
+        self._config_loader = config_loader
+        self._lock = RLock()
+
+    def reload_services(self) -> None:
+        """Refresh services from persistent configuration before each delivery."""
+        if not self._config_loader:
+            return
+
+        configs = self._config_loader()
+        services: Dict[str, PushServiceBase] = {}
+        service_types = {
+            'dingtalk': DingTalkPushService,
+            'feishu': FeishuPushService,
+        }
+        for name in CHANNEL_NAMES:
+            config = configs[name]
+            if config.get('enabled') and config.get('webhook_url'):
+                services[name] = service_types[name](config)
+
+        with self._lock:
+            self.services = services
+            self.default_service = next(iter(services), None)
 
     def register_service(self, name: str, service: PushServiceBase, is_default: bool = False):
         """注册推送服务"""
-        self.services[name] = service
-        if is_default or not self.default_service:
-            self.default_service = name
+        with self._lock:
+            self.services[name] = service
+            if is_default or not self.default_service:
+                self.default_service = name
         logger.info(f"注册推送服务: {name}")
 
     def get_service(self, name: Optional[str] = None) -> Optional[PushServiceBase]:
         """获取推送服务"""
-        service_name = name or self.default_service
-        if not service_name:
-            logger.error("未指定推送服务且无默认服务")
-            return None
+        self.reload_services()
+        with self._lock:
+            service_name = name or self.default_service
+            if not service_name:
+                logger.error("未指定推送服务且无默认服务")
+                return None
 
-        service = self.services.get(service_name)
-        if not service:
-            logger.error(f"推送服务不存在: {service_name}")
-            return None
+            service = self.services.get(service_name)
+            if not service:
+                logger.error(f"推送服务不存在: {service_name}")
+                return None
 
-        return service
+            return service
 
     def send_message(self, message: str, service_name: Optional[str] = None, **kwargs) -> bool:
         """发送消息；未指定渠道时广播到全部已注册服务。"""
+        self.reload_services()
         if service_name:
-            service = self.get_service(service_name)
+            with self._lock:
+                service = self.services.get(service_name)
             return bool(service and service.send_message(message, **kwargs))
 
-        if not self.services:
+        with self._lock:
+            services = dict(self.services)
+        if not services:
             logger.error("没有已配置的推送服务")
             return False
 
         results = {
             name: service.send_message(message, **kwargs)
-            for name, service in self.services.items()
+            for name, service in services.items()
         }
         failed_services = [name for name, success in results.items() if not success]
         if failed_services:
@@ -282,17 +465,21 @@ class PushServiceManager:
 
     def test_service(self, service_name: Optional[str] = None) -> bool:
         """测试服务；未指定渠道时测试全部已注册服务。"""
+        self.reload_services()
         if service_name:
-            service = self.get_service(service_name)
+            with self._lock:
+                service = self.services.get(service_name)
             return bool(service and service.test_connection())
 
-        if not self.services:
+        with self._lock:
+            services = dict(self.services)
+        if not services:
             logger.error("没有已配置的推送服务")
             return False
 
         results = {
             name: service.test_connection()
-            for name, service in self.services.items()
+            for name, service in services.items()
         }
         failed_services = [name for name, success in results.items() if not success]
         if failed_services:
@@ -301,7 +488,9 @@ class PushServiceManager:
 
     def get_available_services(self) -> Dict[str, str]:
         """获取可用服务列表"""
-        return {name: service.name for name, service in self.services.items()}
+        self.reload_services()
+        with self._lock:
+            return {name: service.name for name, service in self.services.items()}
 
 
 class MessageTemplate:
@@ -403,31 +592,8 @@ class MessageTemplate:
 
 def create_push_service_manager() -> PushServiceManager:
     """创建并配置推送服务管理器"""
-    manager = PushServiceManager()
-
-    service_configs = (
-        ('dingtalk', 'dingtalk_config.json', DingTalkPushService, '钉钉'),
-        ('feishu', 'feishu_config.json', FeishuPushService, '飞书'),
-    )
-    for name, filename, service_type, display_name in service_configs:
-        try:
-            with open(filename, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-        except FileNotFoundError:
-            logger.info("%s 配置文件不存在，跳过注册%s推送服务", filename, display_name)
-            continue
-        except Exception as e:
-            logger.error("加载%s配置失败: %s", display_name, e)
-            continue
-
-        if not config.get('enabled', True):
-            logger.info("%s 推送已禁用", display_name)
-            continue
-        if not config.get('webhook_url'):
-            logger.warning("%s webhook 地址未配置，跳过注册%s推送服务", display_name, display_name)
-            continue
-
-        manager.register_service(name, service_type(config), is_default=manager.default_service is None)
+    manager = PushServiceManager(config_loader=load_channel_configs)
+    manager.reload_services()
 
     return manager
 

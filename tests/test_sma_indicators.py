@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 import os
 from datetime import datetime, time
@@ -821,6 +822,69 @@ class SmaIndicatorApiTests(unittest.TestCase):
         self.assertIsNone(rejected.headers.get('Access-Control-Allow-Origin'))
         self.assertEqual(preflight.status_code, 200)
         self.assertEqual(preflight.headers.get('Access-Control-Allow-Headers'), 'Content-Type, X-Admin-Token')
+        self.assertEqual(preflight.headers.get('Access-Control-Allow-Methods'), 'GET, POST, PUT, OPTIONS')
+
+    def test_feishu_push_test_endpoint_targets_only_feishu(self):
+        configured_service = object()
+        with (
+            patch.dict(os.environ, {gold_service.ADMIN_TOKEN_ENV: 'test-admin-token'}),
+            patch.object(gold_service.gold_service.push_manager, 'get_service', return_value=configured_service),
+            patch.object(gold_service.gold_service, 'test_push', return_value=True) as test_push,
+        ):
+            response = self.client.post(
+                '/api/push/test/feishu',
+                headers={'X-Admin-Token': 'test-admin-token'},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['message'], '飞书测试推送发送成功')
+        test_push.assert_called_once_with(service_name='feishu')
+
+    def test_feishu_push_test_endpoint_requires_enabled_configuration(self):
+        with (
+            patch.dict(os.environ, {gold_service.ADMIN_TOKEN_ENV: 'test-admin-token'}),
+            patch.object(gold_service.gold_service.push_manager, 'get_service', return_value=None),
+        ):
+            response = self.client.post(
+                '/api/push/test/feishu',
+                headers={'X-Admin-Token': 'test-admin-token'},
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()['message'], '飞书推送未配置或已禁用')
+
+    def test_admin_can_save_channel_settings_without_reading_back_secrets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / 'push_channels.json'
+            with patch.dict(os.environ, {
+                gold_service.ADMIN_TOKEN_ENV: 'test-admin-token',
+                'GOLD_PUSH_CONFIG_PATH': str(config_path),
+            }):
+                saved = self.client.put(
+                    '/api/push/config',
+                    json={
+                        'feishu': {
+                            'enabled': True,
+                            'webhook_url': 'https://open.feishu.cn/open-apis/bot/v2/hook/test',
+                            'secret': 'do-not-return-this',
+                            'link_url': 'https://gold.example.com',
+                        },
+                    },
+                    headers={'X-Admin-Token': 'test-admin-token'},
+                )
+                fetched = self.client.get(
+                    '/api/push/config',
+                    headers={'X-Admin-Token': 'test-admin-token'},
+                )
+
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(fetched.status_code, 200)
+        channel = fetched.get_json()['channels']['feishu']
+        self.assertTrue(channel['enabled'])
+        self.assertTrue(channel['webhook_configured'])
+        self.assertTrue(channel['secret_configured'])
+        self.assertNotIn('webhook_url', channel)
+        self.assertNotIn('secret', channel)
 
     def test_night_opening_push_uses_the_next_trading_day_and_first_quote(self):
         service = gold_service.GoldService()

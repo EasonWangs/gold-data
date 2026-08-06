@@ -10,3 +10,5 @@ __pycache__
 .planning
 .claude
 dingtalk_config.json
+feishu_config.json
+data
