@@ -60,8 +60,8 @@ python gold_service.py --scheduler-only
 - 🔌 **标准接口**: RESTful API 设计，JSON 格式响应
 
 ### 2️⃣ 推送服务
-- ⏰ **定时推送**: 工作日 09:02 日盘开盘、16:02 日线收盘、20:02 夜盘开盘
-- 📱 **手动推送**: 日盘开盘、日线收盘、夜盘开盘快报
+- ⏰ **定时推送**: 工作日 09:02 日盘开盘、13:32 午盘开盘、15:32 日线收盘
+- 📱 **手动推送**: 日盘开盘、模拟日线收盘、KDJ 策略快报
 - 🧪 **测试功能**: 一键测试已启用的钉钉、飞书推送连接
 - 🗓️ **数据保护**: 仅在对应开盘后五分钟取得首个有效报价时发送；日线尚未发布时不伪造收盘数据。
 
@@ -258,9 +258,6 @@ curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/pus
 # 手动推送收盘价
 curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/push/closing
 
-# 手动推送夜盘开盘价
-curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/push/night-opening
-
 # 查看独立调度器的规则说明（不能从 Web Worker 启停）
 curl -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/service/status
 ```
@@ -305,16 +302,12 @@ curl -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/service/sta
 💰 开盘价: 825.50 元/克
 ```
 
-### 🌙 夜盘开盘快报（工作日 20:02）
-
-夜盘快报取 `20:00–20:05` 的首个有效报价，消息中的“所属交易日”是下一交易日；周五晚对应下周一。
-
-### 💼 日线收盘快报（工作日 16:02）
+### 💼 日线收盘快报（工作日 15:32）
 ```
 💼 黄金日线收盘播报
 
 📅 交易日: 2026-07-29
-⏱ 推送时间: 16:02:00（Asia/Shanghai）
+⏱ 推送时间: 15:32:00（Asia/Shanghai）
 🏅 品种: Au99.99（上海黄金交易所）
 
 💰 开盘价: 825.50 元/克
@@ -357,7 +350,7 @@ curl -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/service/sta
 | 🌐 **网络要求** | 确保能访问已启用的钉钉或飞书 API 与 AkShare 可用的上金所行情源 |
 | ⚙️ **配置检查** | 首次使用请在后台填写机器人 Webhook 地址 |
 | 🔐 **管理令牌** | 必须设置 `GOLD_ADMIN_TOKEN` 才能手动或测试推送 |
-| ⏰ **时区设置** | 推送时间固定使用 Asia/Shanghai（09:02 / 16:02 / 20:02） |
+| ⏰ **时区设置** | 推送时间固定使用 Asia/Shanghai（09:02 / 13:32 / 15:32） |
 | 📅 **工作日历** | 周末不调度；法定节假日由源站实际行情和完整日线二次确认 |
 | 🔌 **端口设置** | 默认端口5080，如冲突可修改 |
 

@@ -132,6 +132,7 @@ class SmaIndicatorApiTests(unittest.TestCase):
         self.assertEqual(gold_service.SCHEDULED_PUSH_TIMES['13:32'][0], 'afternoon_opening')
         self.assertIn('15:32', gold_service.SCHEDULED_PUSH_TIMES)
         self.assertNotIn('16:02', gold_service.SCHEDULED_PUSH_TIMES)
+        self.assertNotIn('20:02', gold_service.SCHEDULED_PUSH_TIMES)
 
     def test_server_side_ma_backtest_executes_crosses_and_returns_latest_signal(self):
         result = gold_service.run_strategy_backtest(strategy_history(), strategy='ma5_20')
@@ -885,34 +886,6 @@ class SmaIndicatorApiTests(unittest.TestCase):
         self.assertTrue(channel['secret_configured'])
         self.assertNotIn('webhook_url', channel)
         self.assertNotIn('secret', channel)
-
-    def test_night_opening_push_uses_the_next_trading_day_and_first_quote(self):
-        service = gold_service.GoldService()
-        night_start = datetime(2026, 7, 27, 20, 2, tzinfo=gold_service.MARKET_TIMEZONE)
-        quotes = pd.DataFrame({
-            '时间': [time(20, 2), time(20, 0), time(20, 4)],
-            '现价': [900.2, 900.0, 900.4],
-        })
-        history = pd.DataFrame({
-            'date': ['2026-07-24', '2026-07-27'],
-            'close': [895.0, 898.0],
-        })
-
-        with (
-            patch.object(gold_service, 'market_now', return_value=night_start),
-            patch.object(service, 'get_real_time_gold_price', return_value=quotes),
-            patch.object(service, 'get_historical_gold_price', return_value=history),
-            patch.object(service, 'send_message', return_value=True) as send,
-        ):
-            success, message = service.push_night_opening_price()
-
-        self.assertTrue(success)
-        self.assertEqual(message, '夜盘开盘价格推送成功')
-        sent_message = send.call_args.args[0]
-        self.assertIn('所属交易日:** 2026-07-28', sent_message)
-        self.assertIn('首个有效报价:** 20:00:00', sent_message)
-        self.assertIn('900.0 元/克', sent_message)
-
 
 if __name__ == '__main__':
     unittest.main()

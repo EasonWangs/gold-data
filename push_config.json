@@ -8,14 +8,14 @@
       "quote_window": "09:00–09:05",
       "trading_day": "当日"
     },
-    "daily_settlement": {
-      "time": "16:02",
-      "requires": "官方当日完整日线已发布"
+    "afternoon_opening": {
+      "time": "13:32",
+      "quote_window": "13:30–13:35",
+      "trading_day": "当日"
     },
-    "night_opening": {
-      "time": "20:02",
-      "quote_window": "20:00–20:05",
-      "trading_day": "下一交易日；周五夜盘归属下周一"
+    "daily_settlement": {
+      "time": "15:32",
+      "requires": "官方当日完整日线已发布"
     }
   }
 }

@@ -21,7 +21,6 @@ python gold_service.py --scheduler-only
 | 工作日 09:02 | 日盘开盘 | 取 09:00–09:05 的首个有效报价；归属当日交易日。 |
 | 工作日 13:32 | 午盘开盘 | 取 13:30–13:35 的首个有效报价；归属当日交易日。 |
 | 工作日 15:32 | 日线收盘 | 仅当官方当日完整日线已发布时发送；OHLC 含此前夜盘与当日日盘；若当日触发策略交叉，额外发送一条独立的 🚨 策略信号消息。 |
-| 工作日 20:02 | 夜盘开盘 | 取 20:00–20:05 的首个有效报价；归属下一交易日，周五晚归属下周一。 |
 
 源站无有效报价、不是常规交易日或完整日线尚未发布时，快报不会伪造价格。法定节假日最终以行情源的实际数据为准。
 
@@ -38,12 +37,11 @@ curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://127.0.0.1:5080/api/pus
 # 仅测试飞书机器人（飞书未配置或禁用时返回 HTTP 409）
 curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://127.0.0.1:5080/api/push/test/feishu
 
-# 手动发送开盘价、夜盘开盘价、“最新已发布日线”的模拟收盘快报，
+# 手动发送开盘价、“最新已发布日线”的模拟收盘快报，
 # 或只在最新日线触发 KDJ 交叉时发送策略消息
 curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://127.0.0.1:5080/api/push/opening
 curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" 'http://127.0.0.1:5080/api/push/closing?mode=latest'
 curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://127.0.0.1:5080/api/push/kdj-signal
-curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://127.0.0.1:5080/api/push/night-opening
 
 # 查看调度规则与当前市场时段；该接口不控制调度器
 curl -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://127.0.0.1:5080/api/service/status

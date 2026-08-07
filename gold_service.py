@@ -100,7 +100,6 @@ SCHEDULED_PUSH_TIMES = {
     '09:02': ('day_opening', '日盘开盘', lambda: gold_service.push_opening_price()),
     '13:32': ('afternoon_opening', '午盘开盘', lambda: gold_service.push_afternoon_opening_price()),
     '15:32': ('daily_settlement', '日线收盘', lambda: gold_service.push_closing_price()),
-    '20:02': ('night_opening', '夜盘开盘', lambda: gold_service.push_night_opening_price()),
 }
 SCHEDULER_CONTROL_MESSAGE = (
     '定时推送仅能由独立调度进程管理；请使用 '
@@ -596,10 +595,6 @@ class GoldService:
     def push_afternoon_opening_price(self):
         """推送午盘首个有效报价（13:30–13:35）。"""
         return self._push_session_opening_price(clock_time(13, 30), '午盘')
-
-    def push_night_opening_price(self):
-        """推送夜盘首个有效报价（20:00–20:05）。"""
-        return self._push_session_opening_price(clock_time(20), '夜盘')
 
     def push_closing_price(self, simulation=False):
         """Send a settlement message, or simulate it with the latest daily bar."""
@@ -2016,7 +2011,6 @@ def api_service_status():
             'day_opening': '工作日 09:02（取 09:00–09:05 首个有效报价）',
             'afternoon_opening': '工作日 13:32（取 13:30–13:35 首个有效报价）',
             'daily_settlement': '工作日 15:32（仅官方当日完整日线已发布时发送）',
-            'night_opening': '工作日 20:02（归属下一交易日，取 20:00–20:05 首个有效报价）',
         },
         'market': get_sge_session_status(),
         'timestamp': market_timestamp()
@@ -2194,21 +2188,6 @@ def api_push_kdj_signal():
         }), 500
 
 
-@app.route('/api/push/night-opening', methods=['POST'])
-@require_admin_token
-def api_push_night_opening():
-    """推送夜盘开盘快报。"""
-    try:
-        success, message = gold_service.push_night_opening_price()
-        return push_response(success, message)
-    except Exception as e:
-        logger.error(f"夜盘开盘推送失败: {e}")
-        return jsonify({
-            'status': 'error',
-            'message': f'夜盘开盘推送失败: {str(e)}',
-            'timestamp': market_timestamp()
-        }), 500
-
 @app.route('/api/info', methods=['GET'])
 def api_info():
     """服务信息"""
@@ -2220,7 +2199,7 @@ def api_info():
             'gold_api': '上金所 Au99.99 实时分时与交易日日线',
             'silver_api': '上金所 Ag99.99 实时分时与交易日日线',
             'strategy_backtest': '后端日线策略回测与最新信号输出',
-            'dingtalk_push': '日盘、午盘、日线收盘、夜盘四个时点的钉钉快报',
+            'dingtalk_push': '日盘、午盘、日线收盘三个时点的推送快报',
             'web_interface': 'Web管理界面'
         },
         'endpoints': {
@@ -2237,7 +2216,6 @@ def api_info():
             'day_opening': '工作日 09:02',
             'afternoon_opening': '工作日 13:32',
             'daily_settlement': '工作日 15:32',
-            'night_opening': '工作日 20:02（归属下一交易日）'
         },
         'data_source': DATA_SOURCE,
         'market': get_sge_session_status(),

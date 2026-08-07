@@ -245,9 +245,6 @@
                         <button class="btn" @click="testKdjSignalPush" :disabled="loading.push || !adminToken">
                             🧭 测试 KDJ 策略推送
                         </button>
-                        <button class="btn" @click="pushNightOpening" :disabled="loading.push || !adminToken">
-                            🌙 手动推送夜盘开盘
-                        </button>
                     </div>
 
                     <div class="grid">
@@ -257,7 +254,6 @@
                             <p>• 工作日 13:32 - 午盘开盘（取 13:30–13:35 首个有效报价）</p>
                             <p>• 工作日 15:32 - 日线收盘（官方完整日线发布后）</p>
                             <p>• 手动模拟收盘：使用最新已发布日线，并在消息中标注“模拟”。</p>
-                            <p>• 工作日 20:02 - 夜盘开盘（归属下一交易日）</p>
                             <p>• 周末和节假日以源站实际行情为准；无有效报价时不发送。</p>
                         </div>
                         <div class="card">
@@ -320,7 +316,6 @@ curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/pus
 curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/push/opening
 curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" 'http://localhost:5080/api/push/closing?mode=latest'
 curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/push/kdj-signal
-curl -X POST -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/push/night-opening
                         </div>
                     </div>
 
