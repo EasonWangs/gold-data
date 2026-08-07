@@ -14,7 +14,7 @@
       "trading_day": "当日"
     },
     "daily_settlement": {
-      "time": "15:32",
+      "time": "16:32",
       "requires": "官方当日完整日线已发布"
     }
   }

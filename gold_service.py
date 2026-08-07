@@ -99,7 +99,7 @@ SCHEDULED_PUSH_TIMES = {
     # Give the upstream minute feed time to publish the session's first quote.
     '09:02': ('day_opening', '日盘开盘', lambda: gold_service.push_opening_price()),
     '13:32': ('afternoon_opening', '午盘开盘', lambda: gold_service.push_afternoon_opening_price()),
-    '15:32': ('daily_settlement', '日线收盘', lambda: gold_service.push_closing_price()),
+    '16:32': ('daily_settlement', '日线收盘', lambda: gold_service.push_closing_price()),
 }
 SCHEDULER_CONTROL_MESSAGE = (
     '定时推送仅能由独立调度进程管理；请使用 '
@@ -800,7 +800,7 @@ class GoldService:
         Before the source publishes the current official daily bar, compose a
         provisional bar from same-trading-day realtime ticks, matching the
         front end.  This is deliberately separate from the simulated close
-        push: the 15:32 settlement push keeps using only official daily OHLC.
+        push: the 16:32 settlement push keeps using only official daily OHLC.
         A ``None`` result means the check completed without a KDJ crossover.
         """
         logger.info('开始检查当前交易日的 KDJ 策略信号...')
@@ -2010,7 +2010,7 @@ def api_service_status():
         'scheduled_pushes': {
             'day_opening': '工作日 09:02（取 09:00–09:05 首个有效报价）',
             'afternoon_opening': '工作日 13:32（取 13:30–13:35 首个有效报价）',
-            'daily_settlement': '工作日 15:32（仅官方当日完整日线已发布时发送）',
+            'daily_settlement': '工作日 16:32（仅官方当日完整日线已发布时发送）',
         },
         'market': get_sge_session_status(),
         'timestamp': market_timestamp()
@@ -2215,7 +2215,7 @@ def api_info():
         'schedule': {
             'day_opening': '工作日 09:02',
             'afternoon_opening': '工作日 13:32',
-            'daily_settlement': '工作日 15:32',
+            'daily_settlement': '工作日 16:32',
         },
         'data_source': DATA_SOURCE,
         'market': get_sge_session_status(),
