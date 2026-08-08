@@ -127,11 +127,11 @@ class SmaIndicatorApiTests(unittest.TestCase):
         self.assertEqual(body['market']['timezone'], 'Asia/Shanghai')
         self.assertIn('夜盘', body['market']['daily_bar_note'])
 
-    def test_scheduled_pushes_include_afternoon_opening_and_1632_settlement(self):
+    def test_scheduled_pushes_include_afternoon_opening_and_1532_settlement(self):
         self.assertIn('13:32', gold_service.SCHEDULED_PUSH_TIMES)
         self.assertEqual(gold_service.SCHEDULED_PUSH_TIMES['13:32'][0], 'afternoon_opening')
-        self.assertIn('16:32', gold_service.SCHEDULED_PUSH_TIMES)
-        self.assertNotIn('15:32', gold_service.SCHEDULED_PUSH_TIMES)
+        self.assertIn('15:32', gold_service.SCHEDULED_PUSH_TIMES)
+        self.assertNotIn('16:32', gold_service.SCHEDULED_PUSH_TIMES)
         self.assertNotIn('16:02', gold_service.SCHEDULED_PUSH_TIMES)
         self.assertNotIn('20:02', gold_service.SCHEDULED_PUSH_TIMES)
 
@@ -243,6 +243,38 @@ class SmaIndicatorApiTests(unittest.TestCase):
         self.assertIn('买入权重 x5', strategy_message)
         self.assertIn('MA5/20、MA10/30、MACD、MACD 零轴', strategy_message)
         self.assertEqual(sender.call_args_list[1].kwargs['title'], '🚨 黄金策略信号')
+
+    def test_closing_push_aggregates_realtime_ohlc_when_official_daily_bar_is_delayed(self):
+        service = gold_service.gold_service
+        now = datetime(2026, 6, 2, 15, 32, tzinfo=gold_service.MARKET_TIMEZONE)
+        history = pd.DataFrame({
+            'date': ['2026-06-01'],
+            'open': [100.0],
+            'high': [102.0],
+            'low': [99.0],
+            'close': [101.0],
+        })
+        quotes = pd.DataFrame({
+            '时间': [time(9), time(10), time(14), time(15, 30)],
+            '现价': [102.0, 101.0, 105.0, 104.0],
+        })
+        with (
+            patch.object(service, 'is_trading_day', return_value=True),
+            patch.object(service, 'get_historical_gold_price', return_value=history),
+            patch.object(service, 'get_real_time_gold_price', return_value=quotes),
+            patch.object(service, 'send_message', return_value=True) as sender,
+            patch.object(gold_service, 'market_now', return_value=now),
+        ):
+            success, message = service.push_closing_price()
+
+        self.assertTrue(success)
+        self.assertEqual(message, '收盘价格推送成功')
+        sender.assert_called_once()
+        closing_message = sender.call_args.args[0]
+        self.assertIn('开盘价:** 102.0', closing_message)
+        self.assertIn('最低-高价:** 101.0 ~ 105.0', closing_message)
+        self.assertIn('收盘价:** 104.0', closing_message)
+        self.assertIn('官方日线尚未发布，本快报按当日实时分时行情聚合', closing_message)
 
     def test_manual_kdj_signal_push_sends_only_the_triggered_strategy_message(self):
         service = gold_service.gold_service

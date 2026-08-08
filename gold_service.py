@@ -99,7 +99,7 @@ SCHEDULED_PUSH_TIMES = {
     # Give the upstream minute feed time to publish the session's first quote.
     '09:02': ('day_opening', '日盘开盘', lambda: gold_service.push_opening_price()),
     '13:32': ('afternoon_opening', '午盘开盘', lambda: gold_service.push_afternoon_opening_price()),
-    '16:32': ('daily_settlement', '日线收盘', lambda: gold_service.push_closing_price()),
+    '15:32': ('daily_settlement', '日线收盘', lambda: gold_service.push_closing_price()),
 }
 SCHEDULER_CONTROL_MESSAGE = (
     '定时推送仅能由独立调度进程管理；请使用 '
@@ -597,116 +597,98 @@ class GoldService:
         return self._push_session_opening_price(clock_time(13, 30), '午盘')
 
     def push_closing_price(self, simulation=False):
-        """Send a settlement message, or simulate it with the latest daily bar."""
+        """Send a settlement message using official or post-close realtime OHLC."""
         if not simulation and not self.is_trading_day():
             logger.info("今日为周末，跳过收盘价格推送")
             return False, '今日非交易日，未发送收盘价格'
 
         logger.info("开始%s收盘价格推送...", '模拟' if simulation else '正式')
-
-        # 获取历史数据并检查日期
-        # Settlement must not rely on a 30-minute intraday cache: the source
-        # may publish the official daily bar shortly after the day session.
         hist_data_full = self.get_historical_gold_price(force_refresh=True)
-
-        if hist_data_full is not None and not hist_data_full.empty:
-            # 检查最后一条记录的日期
-            last_record = hist_data_full.iloc[-1]
-
-            # 转换日期进行比较
-            record_date = normalize_history_date(last_record.get('date'))
-            current_date = market_now().date()
-
-            # 判断最后一条是否是今天的数据
-            if record_date is not None and (record_date == current_date or simulation):
-                # 官方日线已提供完整交易日（含夜盘）的 OHLC，不能用跨零点的
-                # spot_quotations_sge 实时残片重新计算高低价。
-                hist_data = last_record
-
-                # 前一日数据是倒数第二条
-                if len(hist_data_full) >= 2:
-                    prev_data = hist_data_full.iloc[-2]
-                    prev_close = prev_data.get('close', 0)
-                else:
-                    prev_close = 0
-                if simulation and record_date != current_date:
-                    logger.info('模拟推送使用最新已发布日线: %s（当前日期 %s）', record_date, current_date)
-                else:
-                    logger.info(f"使用今天的收盘数据: {record_date}")
-            else:
-                # 官方日线尚未更新时，实时行情会遗漏跨夜交易时段，不能据此拼接
-                # 当日 OHLC 或高低价；宁可拒绝发送，也不能发布错误的收盘区间。
-                logger.warning(f"历史数据最后一条是 {record_date},不是今天 {current_date}")
-                error_data = {
-                    'date': market_now().strftime('%Y-%m-%d'),
-                    'time': market_now().strftime('%H:%M:%S'),
-                    'link_url': self.link_url
-                }
-                error_msg = MessageTemplate.format_error_message(error_data)
-                self.send_message(error_msg, title="数据获取失败")
-                return False, '当日官方收盘数据尚未发布，未发送收盘价格'
-
-            # 计算涨跌（相对于前一日收盘价）
-            close_price = hist_data.get('close', 0)
-            prev_close = prev_close
-
-            # 涨跌额 = 今日收盘价 - 前一日收盘价
-            change = close_price - prev_close if prev_close != 0 and close_price != 0 else 0
-            # 涨跌幅 = (今日收盘价 - 前一日收盘价) / 前一日收盘价 * 100%
-            change_percent = (change / prev_close * 100) if prev_close != 0 else 0
-
-            # 涨跌表情
-            trend_emoji = "📈" if change > 0 else "📉" if change < 0 else "➡️"
-
-            # 准备消息数据
-            message_data = {
-                'date': record_date.isoformat(),
-                'time': market_now().strftime('%H:%M:%S'),
-                'symbol': 'Au99.99 (上海黄金交易所)',
-                'open_price': hist_data.get('open', 'N/A'),
-                'close_price': hist_data.get('close', 'N/A'),
-                'low_price': hist_data.get('low', 'N/A'),
-                'high_price': hist_data.get('high', 'N/A'),
-                'prev_close': f"{prev_close:.2f}" if prev_close != 0 else 'N/A',
-                'trend_emoji': trend_emoji,
-                'change': change,
-                'change_percent': change_percent,
-                'simulation_note': (
-                    '> ⚠️ 此为手动模拟推送，展示最新已发布的官方日线。\n'
-                    if simulation else ''
-                ),
-                'link_url': self.link_url
-            }
-
-            message = MessageTemplate.format_closing_price_message(message_data)
-            title = '黄金收盘价格模拟播报' if simulation else '黄金收盘价格播报'
-            sent = self.send_message(message, title=title)
-            if sent:
-                self._record_successful_push()
-                strategy_result = self._push_closing_strategy_signals(
-                    hist_data_full,
-                    record_date,
-                    close_price,
-                    simulation,
-                )
-                message = '收盘价格模拟推送成功' if simulation else '收盘价格推送成功'
-                if strategy_result is True:
-                    return True, f'{message}；策略信号推送成功'
-                if strategy_result is False:
-                    return True, f'{message}；策略信号推送失败'
-                return True, message
-
-            logger.error('收盘价格推送未被钉钉接受')
-            return False, '钉钉未接受收盘价格推送'
-        else:
+        market_time = market_now()
+        if hist_data_full is None or hist_data_full.empty:
             error_data = {
-                'date': market_now().strftime('%Y-%m-%d'),
-                'time': market_now().strftime('%H:%M:%S'),
-                'link_url': self.link_url
+                'date': market_time.strftime('%Y-%m-%d'),
+                'time': market_time.strftime('%H:%M:%S'),
+                'link_url': self.link_url,
             }
-            error_msg = MessageTemplate.format_error_message(error_data)
-            self.send_message(error_msg, title="数据获取失败")
+            self.send_message(MessageTemplate.format_error_message(error_data), title="数据获取失败")
             return False, '无法获取收盘价格数据'
+
+        last_record = hist_data_full.iloc[-1]
+        record_date = normalize_history_date(last_record.get('date'))
+        current_date = market_time.date()
+        uses_realtime_bar = False
+
+        if record_date is not None and (record_date == current_date or simulation):
+            hist_data = last_record
+            prev_close = hist_data_full.iloc[-2].get('close', 0) if len(hist_data_full) >= 2 else 0
+            if simulation and record_date != current_date:
+                logger.info('模拟推送使用最新已发布日线: %s（当前日期 %s）', record_date, current_date)
+            else:
+                logger.info('使用今天的官方收盘数据: %s', record_date)
+        else:
+            logger.info('官方日线最后一条为 %s，使用当日实时分时行情聚合收盘数据', record_date)
+            realtime_bar = self._build_realtime_trading_day_bar(
+                self.get_real_time_gold_price(), market_time,
+            )
+            if realtime_bar is None:
+                error_data = {
+                    'date': market_time.strftime('%Y-%m-%d'),
+                    'time': market_time.strftime('%H:%M:%S'),
+                    'link_url': self.link_url,
+                }
+                self.send_message(MessageTemplate.format_error_message(error_data), title="数据获取失败")
+                return False, '当日官方日线与实时分时数据均不可用，未发送收盘价格'
+            hist_data = realtime_bar
+            record_date = datetime.strptime(realtime_bar['date'], '%Y-%m-%d').date()
+            prev_close = last_record.get('close', 0)
+            uses_realtime_bar = True
+
+        close_price = hist_data.get('close', 0)
+        change = close_price - prev_close if prev_close != 0 and close_price != 0 else 0
+        change_percent = (change / prev_close * 100) if prev_close != 0 else 0
+        trend_emoji = "📈" if change > 0 else "📉" if change < 0 else "➡️"
+        message_data = {
+            'date': record_date.isoformat(),
+            'time': market_time.strftime('%H:%M:%S'),
+            'symbol': 'Au99.99 (上海黄金交易所)',
+            'open_price': hist_data.get('open', 'N/A'),
+            'close_price': close_price,
+            'low_price': hist_data.get('low', 'N/A'),
+            'high_price': hist_data.get('high', 'N/A'),
+            'prev_close': f"{prev_close:.2f}" if prev_close != 0 else 'N/A',
+            'trend_emoji': trend_emoji,
+            'change': change,
+            'change_percent': change_percent,
+            'simulation_note': (
+                '> ⚠️ 此为手动模拟推送，展示最新已发布的官方日线。\n'
+                if simulation else ''
+            ),
+            'data_note': (
+                '> ⚠️ 官方日线尚未发布，本快报按当日实时分时行情聚合；夜盘数据以实时源实际返回为准。\n'
+                if uses_realtime_bar else
+                '> 日线高低开收包含此前夜盘与当日日盘；并非银行积存金报价。\n'
+            ),
+            'link_url': self.link_url,
+        }
+        message = MessageTemplate.format_closing_price_message(message_data)
+        title = '黄金收盘价格模拟播报' if simulation else '黄金收盘价格播报'
+        if not self.send_message(message, title=title):
+            logger.error('钉钉未接受收盘价格推送')
+            return False, '钉钉未接受收盘价格推送'
+
+        self._record_successful_push()
+        strategy_result = (
+            None if uses_realtime_bar else self._push_closing_strategy_signals(
+                hist_data_full, record_date, close_price, simulation,
+            )
+        )
+        message = '收盘价格模拟推送成功' if simulation else '收盘价格推送成功'
+        if strategy_result is True:
+            return True, f'{message}；策略信号推送成功'
+        if strategy_result is False:
+            return True, f'{message}；策略信号推送失败'
+        return True, message
 
     def _push_closing_strategy_signals(self, history_data, trading_date, close_price, simulation,
                                        simulation_note=None):
@@ -800,7 +782,8 @@ class GoldService:
         Before the source publishes the current official daily bar, compose a
         provisional bar from same-trading-day realtime ticks, matching the
         front end.  This is deliberately separate from the simulated close
-        push: the 16:32 settlement push keeps using only official daily OHLC.
+        push: the 15:32 settlement push uses this bar when the official daily
+        OHLC has not yet been published.
         A ``None`` result means the check completed without a KDJ crossover.
         """
         logger.info('开始检查当前交易日的 KDJ 策略信号...')
@@ -2010,7 +1993,7 @@ def api_service_status():
         'scheduled_pushes': {
             'day_opening': '工作日 09:02（取 09:00–09:05 首个有效报价）',
             'afternoon_opening': '工作日 13:32（取 13:30–13:35 首个有效报价）',
-            'daily_settlement': '工作日 16:32（仅官方当日完整日线已发布时发送）',
+            'daily_settlement': '工作日 15:32（优先官方日线；未发布时聚合当日实时分时行情）',
         },
         'market': get_sge_session_status(),
         'timestamp': market_timestamp()
@@ -2215,7 +2198,7 @@ def api_info():
         'schedule': {
             'day_opening': '工作日 09:02',
             'afternoon_opening': '工作日 13:32',
-            'daily_settlement': '工作日 16:32',
+            'daily_settlement': '工作日 15:32',
         },
         'data_source': DATA_SOURCE,
         'market': get_sge_session_status(),

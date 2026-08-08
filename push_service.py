@@ -535,7 +535,7 @@ class MessageTemplate:
 **{trend_emoji} 涨跌额:** {change:.2f} 元/克 ({change_percent:.2f}%)
 
 {simulation_note}
-> 日线高低开收包含此前夜盘与当日日盘；并非银行积存金报价。
+{data_note}
 
 🔗 [查看详细数据]({link_url})"""
 
