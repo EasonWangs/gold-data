@@ -135,6 +135,24 @@ class SmaIndicatorApiTests(unittest.TestCase):
         self.assertNotIn('16:02', gold_service.SCHEDULED_PUSH_TIMES)
         self.assertNotIn('20:02', gold_service.SCHEDULED_PUSH_TIMES)
 
+    def test_opening_push_retries_until_a_quote_is_available_in_the_window(self):
+        first_attempt = datetime(2026, 8, 11, 9, 2, tzinfo=gold_service.MARKET_TIMEZONE)
+        retry_attempt = datetime(2026, 8, 11, 9, 3, tzinfo=gold_service.MARKET_TIMEZONE)
+        gold_service.scheduled_pushes.clear()
+
+        with (
+            patch.object(gold_service, 'market_now', side_effect=[first_attempt, retry_attempt]),
+            patch.object(gold_service.gold_service, 'push_opening_price', side_effect=[
+                (False, '未获取到日盘开盘报价，未发送推送'),
+                (True, '日盘开盘价格推送成功'),
+            ]) as push,
+        ):
+            gold_service.run_due_pushes()
+            gold_service.run_due_pushes()
+
+        self.assertEqual(push.call_count, 2)
+        self.assertIn('2026-08-11:day_opening', gold_service.scheduled_pushes)
+
     def test_server_side_ma_backtest_executes_crosses_and_returns_latest_signal(self):
         result = gold_service.run_strategy_backtest(strategy_history(), strategy='ma5_20')
 

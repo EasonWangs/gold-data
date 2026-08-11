@@ -101,6 +101,13 @@ SCHEDULED_PUSH_TIMES = {
     '13:32': ('afternoon_opening', '午盘开盘', lambda: gold_service.push_afternoon_opening_price()),
     '15:32': ('daily_settlement', '日线收盘', lambda: gold_service.push_closing_price()),
 }
+# An upstream quote can appear a little after the scheduled opening trigger.
+# Keep retrying within the same five-minute quote window; a successful delivery
+# is the only condition that marks the opening push as complete for the day.
+OPENING_PUSH_RETRY_END_TIMES = {
+    'day_opening': clock_time(9, 5),
+    'afternoon_opening': clock_time(13, 35),
+}
 SCHEDULER_CONTROL_MESSAGE = (
     '定时推送仅能由独立调度进程管理；请使用 '
     '`python gold_service.py --scheduler-only` 启动。'
@@ -859,6 +866,26 @@ def run_due_pushes():
     scheduled_pushes.intersection_update(
         key for key in scheduled_pushes if key.startswith(today_prefix)
     )
+
+    for scheduled_time, scheduled_push in SCHEDULED_PUSH_TIMES.items():
+        push_name, push_label, push_job = scheduled_push
+        retry_end = OPENING_PUSH_RETRY_END_TIMES.get(push_name)
+        if retry_end is None:
+            continue
+
+        trigger_time = clock_time.fromisoformat(scheduled_time)
+        if not trigger_time <= now.time() <= retry_end:
+            continue
+
+        push_key = f'{now.date().isoformat()}:{push_name}'
+        if push_key in scheduled_pushes:
+            return
+
+        logger.info('触发上海时区 %s 定时推送（报价窗口内重试）', push_label)
+        success, _ = push_job()
+        if success:
+            scheduled_pushes.add(push_key)
+        return
 
     scheduled_push = SCHEDULED_PUSH_TIMES.get(now.strftime('%H:%M'))
     if not scheduled_push:
