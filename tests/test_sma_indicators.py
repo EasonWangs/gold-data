@@ -262,6 +262,49 @@ class SmaIndicatorApiTests(unittest.TestCase):
         self.assertIn('MA5/20、MA10/30、MACD、MACD 零轴', strategy_message)
         self.assertEqual(sender.call_args_list[1].kwargs['title'], '🚨 黄金策略信号')
 
+    def test_closing_push_checks_strategy_against_provisional_realtime_bar(self):
+        """A delayed official daily feed must not suppress a 15:32 KDJ alert."""
+        service = gold_service.gold_service
+        now = datetime(2026, 6, 2, 15, 32, tzinfo=gold_service.MARKET_TIMEZONE)
+        history = pd.DataFrame({
+            'date': ['2026-06-01'],
+            'open': [100.0],
+            'high': [102.0],
+            'low': [99.0],
+            'close': [101.0],
+        })
+        realtime_bar = {
+            'date': '2026-06-02',
+            'open': 101.0,
+            'high': 104.0,
+            'low': 100.0,
+            'close': 103.0,
+        }
+        signals = [{
+            'strategy_name': 'KDJ',
+            'action': 'buy',
+            'signal_weight': 1,
+            'confirmations': [],
+        }]
+        with (
+            patch.object(service, 'is_trading_day', return_value=True),
+            patch.object(service, 'get_historical_gold_price', return_value=history),
+            patch.object(service, 'get_real_time_gold_price', return_value=pd.DataFrame()),
+            patch.object(service, '_build_realtime_trading_day_bar', return_value=realtime_bar),
+            patch.object(service, 'send_message', return_value=True) as sender,
+            patch.object(gold_service, 'collect_closing_strategy_signals', return_value=signals) as collector,
+            patch.object(gold_service, 'market_now', return_value=now),
+        ):
+            success, _ = service.push_closing_price()
+
+        self.assertTrue(success)
+        self.assertEqual(sender.call_count, 2)
+        strategy_history, strategy_date = collector.call_args.args
+        self.assertEqual(strategy_date.isoformat(), '2026-06-02')
+        self.assertEqual(strategy_history.iloc[-1]['date'], '2026-06-02')
+        strategy_message = sender.call_args_list[1].args[0]
+        self.assertIn('实时行情合成的日线', strategy_message)
+
     def test_closing_push_aggregates_realtime_ohlc_when_official_daily_bar_is_delayed(self):
         service = gold_service.gold_service
         now = datetime(2026, 6, 2, 15, 32, tzinfo=gold_service.MARKET_TIMEZONE)

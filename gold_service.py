@@ -685,10 +685,28 @@ class GoldService:
             return False, '钉钉未接受收盘价格推送'
 
         self._record_successful_push()
-        strategy_result = (
-            None if uses_realtime_bar else self._push_closing_strategy_signals(
-                hist_data_full, record_date, close_price, simulation,
+        # The daily feed normally lags the 15:32 settlement job.  Do not drop a
+        # valid K/D crossover merely because this run had to build today's bar
+        # from realtime quotes.  Append that bar just as the manual KDJ check
+        # does, and make the alert's provisional nature explicit to recipients.
+        strategy_history = hist_data_full
+        strategy_note = None
+        if uses_realtime_bar:
+            strategy_history = pd.concat(
+                [hist_data_full, pd.DataFrame([hist_data])],
+                ignore_index=True,
             )
+            strategy_note = (
+                '> ⚠️ 官方日线尚未发布；本策略信号按当日实时行情合成的日线计算，'
+                '后续请以官方完整日线复核。\n'
+            )
+
+        strategy_result = self._push_closing_strategy_signals(
+            strategy_history,
+            record_date,
+            close_price,
+            simulation,
+            simulation_note=strategy_note,
         )
         message = '收盘价格模拟推送成功' if simulation else '收盘价格推送成功'
         if strategy_result is True:
@@ -743,9 +761,10 @@ class GoldService:
     def _build_realtime_trading_day_bar(self, spot_data, market_time):
         """Build the front-end-equivalent provisional daily bar from live ticks.
 
-        This is only for the manual KDJ check before the official daily bar is
-        published.  The resulting bar never reaches the scheduled settlement
-        path, which must continue to use the source's completed OHLC data.
+        This is used by both the scheduled settlement signal and the manual KDJ
+        check before the official daily bar is published.  Any resulting
+        strategy alert identifies itself as provisional for later verification
+        against the source's completed OHLC data.
         """
         if spot_data is None or spot_data.empty:
             return None
