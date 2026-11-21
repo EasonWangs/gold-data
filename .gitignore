@@ -184,3 +184,7 @@ dingtalk_config.json
 feishu_config.json
 data/
 .DS_Store
+/.claude
+/.planning
+/.playwright-cli
+/output
