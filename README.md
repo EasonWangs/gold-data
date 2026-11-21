@@ -20,7 +20,12 @@ docker compose up -d --build
 
 完整的 NAS、反向代理和更新说明见 [NAS_DEPLOYMENT.md](NAS_DEPLOYMENT.md)。
 
+行情支持 `direct`（默认直连上金所）和 `akshare` 两种获取方式。在 `.env` 设置
+`GOLD_SGE_PROVIDER=akshare` 后重建 Web 与 scheduler 容器即可切换；`/api/info` 的
+`data_provider` 显示生效配置。两种方式保留相同的连接/读取超时、缓存和接口字段。
+
 ### 安装依赖
+使用 Python 3.11.5 或以上版本；Docker 镜像使用 Python 3.12。
 ```bash
 # 在项目目录创建独立虚拟环境，避免修改系统或 Homebrew 管理的 Python
 python3 -m venv .venv
@@ -327,7 +332,7 @@ curl -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/service/sta
 
 | 层次 | 技术栈 | 说明 |
 |------|--------|------|
-| **后端** | Flask + Requests + pandas + schedule | Web框架 + 上金所行情获取与计算 + 定时任务 |
+| **后端** | Flask + Requests / AkShare + pandas + schedule | Web框架 + 可切换的上金所行情获取与计算 + 定时任务 |
 | **前端** | 原生JS + CSS3 | 响应式Web界面 |
 | **推送** | 钉钉、飞书机器人 API | 消息推送服务 |
 | **部署** | 单文件运行 | 无复杂依赖 |
@@ -398,6 +403,6 @@ python gold_service.py --scheduler-only
 
 ---
 
-**🏅 数据来源**: 上海黄金交易所 Au99.99 / Ag99.99（直接获取）
-**🔧 技术栈**: Flask + Requests + pandas + 钉钉API
+**🏅 数据来源**: 上海黄金交易所 Au99.99 / Ag99.99（直连或经 AkShare 获取）
+**🔧 技术栈**: Flask + Requests / AkShare + pandas + 钉钉API
 **📅 版本**: 2.3.0 (2026-07-29)

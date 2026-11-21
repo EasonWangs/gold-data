@@ -1,4 +1,6 @@
-pandas>=1.5.0
+# This version supports native timeouts and the renamed spot_realtime_sge API.
+akshare==1.20.65
+pandas>=2.2.2
 requests>=2.28.0
 flask>=2.0.0
 schedule>=1.2.0

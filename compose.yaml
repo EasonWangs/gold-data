@@ -17,6 +17,7 @@ services:
     environment:
       TZ: ${TZ:-Asia/Shanghai}
       GOLD_PUSH_CONFIG_PATH: /app/data/push_channels.json
+      GOLD_SGE_PROVIDER: ${GOLD_SGE_PROVIDER:-direct}
     # Use the image's production command, shared with direct NAS deployments.
     ports:
       - "${GOLD_HOST_PORT:-5080}:5080"
@@ -49,6 +50,7 @@ services:
     environment:
       TZ: ${TZ:-Asia/Shanghai}
       GOLD_PUSH_CONFIG_PATH: /app/data/push_channels.json
+      GOLD_SGE_PROVIDER: ${GOLD_SGE_PROVIDER:-direct}
     command: ["python", "gold_service.py", "--scheduler-only"]
     volumes:
       - push-runtime:/app/data

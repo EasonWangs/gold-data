@@ -92,7 +92,7 @@ docker compose logs --timestamps --tail=200 web scheduler
 - 镜像启用 Python `faulthandler`，部分原生崩溃会把 Python 栈写入容器日志；OOM 或 `SIGKILL` 不能靠 Python 捕获。
 - `init` 与停止宽限期不等于业务任务已实现优雅退出；更新时尽量避开推送窗口。
 
-**行情请求与缓存保护**：实时分时和历史日线由 `sge_client.py` 直接请求原有上金所接口，连接超时为 3.05 秒，读取空闲超时为 10 秒；HTTP 错误、超时和无效 JSON 会走现有失败响应，不自动重试、不把失败当成有效行情缓存。已移除不再使用的 AkShare 依赖。连接/读取超时不是整个请求的硬截止时间（DNS 解析、多 IP 连接尝试、持续慢速传输等可能使总时长更长），参见 [Requests 超时说明](https://requests.readthedocs.io/en/latest/user/advanced/#timeouts)。Waitress 的 `channel_timeout` 只针对客户端空闲连接，不能代替上游请求超时。
+**行情请求与缓存保护**：`sge_client.py` 同时支持直连上金所和通过 AkShare 获取实时分时、历史日线。两种方式的连接超时均为 3.05 秒，读取空闲超时为 10 秒；超时和解析失败会走现有失败响应，不自动重试、不把失败当成有效行情缓存。直连方式会在解析前检查 HTTP 错误；AkShare 方式使用 SDK 自身的请求及解析逻辑，并通过其原生 `set_timeout` 配置超时，不修改全局 Requests。连接/读取超时不是整个请求的硬截止时间（DNS 解析、多 IP 连接尝试、持续慢速传输等可能使总时长更长），参见 [Requests 超时说明](https://requests.readthedocs.io/en/latest/user/advanced/#timeouts)。Waitress 的 `channel_timeout` 只针对客户端空闲连接，不能代替上游请求超时。
 
 缓存的全局锁只保护内存状态；网络请求和指标计算都在锁外执行。同一行情类型、品种的并发缓存刷新共享一次抓取及其结果/异常，不同缓存键互不等待。等待同一刷新最多 20 秒，等待超时不会取消原请求或额外发起重复抓取；这是等待请求的限制，不是后台任务的强制终止机制。有效缓存仍可直接读取，强制刷新跳过已有缓存，但会合并正在进行的同键刷新。失败不会覆盖仍有效的旧缓存，也不会把过期数据当作新数据返回。
 
@@ -105,4 +105,32 @@ python -m unittest discover -s tests -v
 
 测试不会访问真实行情源或发送推送；其中一个测试临时监听 `127.0.0.1` 的随机端口以模拟无响应源站。这些应用层修复能降低阻塞风险，但仍需 NAS 的退出记录才能确认容器停止的根因。
 
-另外，`requirements.txt` 目前使用依赖版本下限，每次重新构建可能安装不同版本。生产环境宜保留已验证的镜像版本以便回滚，并在测试后固定依赖；避免通过定时重启或盲目增大线程数掩盖故障。
+AkShare 已固定为 `1.20.65`，避免重新构建时因接口改名漂移。其他依赖仍使用版本下限，每次重新构建可能安装不同版本。生产环境宜保留已验证的镜像版本以便回滚；避免通过定时重启或盲目增大线程数掩盖故障。
+
+## 7. 切换行情获取方式
+
+在 NAS 项目的 `.env` 中设置 `GOLD_SGE_PROVIDER`：
+
+| 值 | 获取方式 |
+| --- | --- |
+| `direct`（默认） | Requests 直接访问上金所；启动时不导入 AkShare。 |
+| `akshare` | 使用固定版本 AkShare 的 `spot_realtime_sge` 与 `spot_hist_sge`，由 SDK 获取并解析同一上金所数据源。 |
+
+例如切换到 AkShare：
+
+```env
+GOLD_SGE_PROVIDER=akshare
+```
+
+使用本仓库源码构建时，更新代码并重建两个服务：
+
+```bash
+docker compose up -d --build --force-recreate web scheduler
+curl http://127.0.0.1:5080/api/info
+```
+
+若在 NAS 界面直接创建容器，先下载包含此功能的新镜像，在 Web 和 scheduler 两个容器的环境变量中同时设置该值，再重建容器。单独执行 `docker restart` 不会应用修改后的环境变量。切回直连时将值改为 `direct` 并同样重建。
+
+`/api/info` 的 `data_provider` 应显示所选值，并列出 `supported_data_providers`；实时和历史成功响应也包含 `data_provider`。如果缺少这些字段，说明当前访问的仍是旧版后端或代理目标没有更新。每个进程在启动时固定获取方式，切换后使用新缓存；没有按请求查询参数切换或失败后自动切换。
+
+AkShare 模式要求安装 `requirements.txt` 指定的依赖（Python 至少 3.11.5，镜像使用 3.12）。不兼容的旧 SDK 或错误配置会在启动时明确报错，不退回到无超时请求。若旧版日志显示 `spot_quotations_sge` 属性不存在，是旧调用名称与新版 AkShare 不兼容；本版本已使用新版实时接口名称。

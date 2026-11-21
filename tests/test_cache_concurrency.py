@@ -56,7 +56,7 @@ class CacheConcurrencyTests(unittest.TestCase):
         silver = pd.DataFrame({'现价': [7000]})
         daily = history(800)
 
-        def quotes(symbol):
+        def quotes(symbol, *, provider):
             if symbol == gold_service.GOLD_SYMBOL:
                 self.block()
                 return gold

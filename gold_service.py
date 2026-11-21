@@ -360,7 +360,10 @@ def require_admin_token(view):
     return wrapped
 
 class GoldService:
-    def __init__(self):
+    def __init__(self, provider=None):
+        # Changing the deployment environment requires restarting both services.
+        # Each instance keeps one provider and its own caches for its lifetime.
+        self.data_provider = sge_client.configure_provider(provider)
         self.webhook_url = None
         self.link_url = primary_link_url()
         self.push_manager = push_manager
@@ -433,13 +436,14 @@ class GoldService:
             return self._get_cached_data(
                 f'spot_quotations_sge:{symbol}',
                 lambda: drop_terminal_realtime_outlier(
-                    sge_client.spot_quotations_sge(symbol=symbol),
+                    sge_client.spot_quotations_sge(symbol=symbol, provider=self.data_provider),
                     symbol,
                 ),
                 REALTIME_CACHE_TTL_SECONDS,
             )
         except Exception as e:
-            logger.error(f"获取 {symbol} 实时价格失败: {e}")
+            logger.error('获取 %s 实时价格失败 [provider=%s, %s]: %s',
+                         symbol, self.data_provider, type(e).__name__, e)
             return None
 
     def get_historical_sge_price(self, symbol, days=30, force_refresh=False):
@@ -447,7 +451,7 @@ class GoldService:
         try:
             spot_hist_sge_df = self._get_cached_data(
                 f'spot_hist_sge:{symbol}',
-                lambda: sge_client.spot_hist_sge(symbol=symbol),
+                lambda: sge_client.spot_hist_sge(symbol=symbol, provider=self.data_provider),
                 historical_cache_ttl_seconds(),
                 on_refresh=lambda: self._evict_cached_indicators(symbol),
                 force_refresh=force_refresh,
@@ -458,7 +462,8 @@ class GoldService:
                 return spot_hist_sge_df.tail(days)
             return spot_hist_sge_df
         except Exception as e:
-            logger.error(f"获取 {symbol} 历史价格失败: {e}")
+            logger.error('获取 %s 历史价格失败 [provider=%s, %s]: %s',
+                         symbol, self.data_provider, type(e).__name__, e)
             return None
 
     def get_cached_indicators(self, symbol, indicator_key, loader, *, history_data):
@@ -914,6 +919,7 @@ class GoldService:
 
 # 初始化服务
 gold_service = GoldService()
+logger.info('行情获取方式: %s', gold_service.data_provider)
 
 
 def run_due_pushes():
@@ -1916,6 +1922,7 @@ def realtime_sge_response(symbol, metal_name):
                 "symbol": symbol,
                 "unit": GOLD_UNIT if symbol == GOLD_SYMBOL else SILVER_UNIT,
                 "data_source": DATA_SOURCE,
+                "data_provider": gold_service.data_provider,
                 "market": get_sge_session_status(response_time),
                 "data": records,
                 "count": len(records)
@@ -1925,6 +1932,7 @@ def realtime_sge_response(symbol, metal_name):
             return jsonify({
                 "status": "error",
                 "message": f"无法获取实时{metal_name}价格数据",
+                "data_provider": gold_service.data_provider,
                 "timestamp": market_timestamp()
             }), 500
     except Exception as e:
@@ -1977,6 +1985,7 @@ def historical_sge_response(symbol, metal_name):
         "symbol": symbol,
         "unit": GOLD_UNIT if symbol == GOLD_SYMBOL else SILVER_UNIT,
         "data_source": DATA_SOURCE,
+        "data_provider": gold_service.data_provider,
         "market": get_sge_session_status(),
         "data": serialize_sge_records(data, historical=True),
         "count": len(data),
@@ -2041,6 +2050,7 @@ def api_gold_info():
         "version": API_VERSION,
         "description": "提供上金所 Au99.99 与 Ag99.99 的实时分时和交易日日线数据",
         "data_source": DATA_SOURCE,
+        "data_provider": gold_service.data_provider,
         "market": get_sge_session_status(),
         "endpoints": {
             "/api/gold/spot_quotations_sge": "获取实时黄金价格",
@@ -2295,7 +2305,9 @@ def api_info():
         'symbols': {
             'gold': GOLD_SYMBOL,
             'silver': SILVER_SYMBOL
-        }
+        },
+        'data_provider': gold_service.data_provider,
+        'supported_data_providers': list(sge_client.SUPPORTED_PROVIDERS),
     })
 
 if __name__ == '__main__':
