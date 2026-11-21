@@ -8,6 +8,7 @@ createApp({
             activeTab: 'price',
             tabs: [
                 { id: 'price', name: '📊 价格数据' },
+                { id: 'market', name: '⚙️ 行情设置' },
                 { id: 'push', name: '🔔 推送管理' },
                 { id: 'api', name: '🔌 API文档' }
             ],
@@ -17,7 +18,8 @@ createApp({
                 silverRealtime: false,
                 silverHistory: false,
                 push: false,
-                pushConfig: false
+                pushConfig: false,
+                marketConfig: false
             },
             realtimeData: null,
             realtimeResponse: null,
@@ -32,6 +34,12 @@ createApp({
             silverHistoryDays: 5,
             silverHistoryError: null,
             adminToken: '',
+            marketProvider: 'direct',
+            currentMarketProvider: null,
+            marketConfigSource: null,
+            marketConfigLoaded: false,
+            marketConfigMessage: null,
+            marketDataGeneration: 0,
             pushMessage: null,
             pushConfigMessage: null,
             pushConfig: {
@@ -56,6 +64,66 @@ createApp({
         this.restoreCachedPushConfig();
     },
     methods: {
+        selectTab(tab) {
+            this.activeTab = tab;
+            if (tab === 'market') this.loadMarketConfig();
+        },
+
+        clearMarketData() {
+            this.marketDataGeneration += 1;
+            for (const key of ['realtimeData', 'realtimeResponse', 'realtimeError', 'historyError',
+                'silverRealtimeData', 'silverRealtimeResponse', 'silverRealtimeError', 'silverHistoryError']) {
+                this[key] = null;
+            }
+            this.historyData = [];
+            this.silverHistoryData = [];
+        },
+
+        applyMarketConfig(config) {
+            if (this.currentMarketProvider && this.currentMarketProvider !== config.provider) {
+                this.clearMarketData();
+            }
+            this.marketProvider = config.provider;
+            this.currentMarketProvider = config.provider;
+            this.marketConfigSource = config.source;
+            this.marketConfigLoaded = true;
+        },
+
+        async loadMarketConfig() {
+            this.marketConfigLoaded = false;
+            this.marketConfigMessage = null;
+            if (!this.adminToken) return;
+            this.loading.marketConfig = true;
+            try {
+                const response = await axios.get('/api/market/config', this.adminRequestConfig());
+                this.applyMarketConfig(response.data.config);
+                this.marketConfigMessage = response.data.config.warning
+                    ? { type: 'error', text: response.data.config.warning }
+                    : { type: 'success', text: '已读取当前行情设置。' };
+            } catch (error) {
+                this.marketConfigMessage = { type: 'error', text: '读取失败: ' + (error.response?.data?.message || error.message) };
+            } finally {
+                this.loading.marketConfig = false;
+            }
+        },
+
+        async saveMarketConfig() {
+            if (!this.adminToken || !this.marketConfigLoaded || this.loading.marketConfig) return;
+            this.loading.marketConfig = true;
+            this.marketConfigMessage = null;
+            try {
+                const response = await axios.put('/api/market/config',
+                    { provider: this.marketProvider }, this.adminRequestConfig());
+                this.clearMarketData();
+                this.applyMarketConfig(response.data.config);
+                this.marketConfigMessage = { type: 'success', text: response.data.message };
+            } catch (error) {
+                this.marketConfigMessage = { type: 'error', text: '切换失败: ' + (error.response?.data?.message || error.message) };
+            } finally {
+                this.loading.marketConfig = false;
+            }
+        },
+
         adminRequestConfig() {
             return {
                 headers: {
@@ -84,11 +152,13 @@ createApp({
         },
 
         async refreshRealTimePrice() {
+            const generation = this.marketDataGeneration;
             this.loading.realtime = true;
             this.realtimeError = null;
 
             try {
                 const response = await axios.get('/api/gold/spot_quotations_sge');
+                if (generation !== this.marketDataGeneration) return;
                 this.realtimeResponse = response.data;
                 if (response.data.status === 'success' && response.data.data.length > 0) {
                     this.realtimeData = response.data.data[response.data.data.length - 1];
@@ -96,6 +166,7 @@ createApp({
                     this.realtimeError = '无法获取实时价格数据';
                 }
             } catch (error) {
+                if (generation !== this.marketDataGeneration) return;
                 this.realtimeError = '网络请求失败: ' + (error.response?.data?.message || error.message);
             } finally {
                 this.loading.realtime = false;
@@ -103,17 +174,20 @@ createApp({
         },
 
         async refreshHistoryPrice() {
+            const generation = this.marketDataGeneration;
             this.loading.history = true;
             this.historyError = null;
 
             try {
                 const response = await axios.get(`/api/gold/spot_hist_sge?days=${this.historyDays}`);
+                if (generation !== this.marketDataGeneration) return;
                 if (response.data.status === 'success') {
                     this.historyData = response.data.data;
                 } else {
                     this.historyError = '无法获取历史价格数据';
                 }
             } catch (error) {
+                if (generation !== this.marketDataGeneration) return;
                 this.historyError = '网络请求失败: ' + (error.response?.data?.message || error.message);
             } finally {
                 this.loading.history = false;
@@ -121,11 +195,13 @@ createApp({
         },
 
         async refreshSilverRealTimePrice() {
+            const generation = this.marketDataGeneration;
             this.loading.silverRealtime = true;
             this.silverRealtimeError = null;
 
             try {
                 const response = await axios.get('/api/silver/spot_quotations_sge');
+                if (generation !== this.marketDataGeneration) return;
                 this.silverRealtimeResponse = response.data;
                 if (response.data.status === 'success' && response.data.data.length > 0) {
                     this.silverRealtimeData = response.data.data[response.data.data.length - 1];
@@ -133,6 +209,7 @@ createApp({
                     this.silverRealtimeError = '无法获取实时白银价格数据';
                 }
             } catch (error) {
+                if (generation !== this.marketDataGeneration) return;
                 this.silverRealtimeError = '网络请求失败: ' + (error.response?.data?.message || error.message);
             } finally {
                 this.loading.silverRealtime = false;
@@ -140,17 +217,20 @@ createApp({
         },
 
         async refreshSilverHistoryPrice() {
+            const generation = this.marketDataGeneration;
             this.loading.silverHistory = true;
             this.silverHistoryError = null;
 
             try {
                 const response = await axios.get(`/api/silver/spot_hist_sge?days=${this.silverHistoryDays}`);
+                if (generation !== this.marketDataGeneration) return;
                 if (response.data.status === 'success') {
                     this.silverHistoryData = response.data.data;
                 } else {
                     this.silverHistoryError = '无法获取历史白银价格数据';
                 }
             } catch (error) {
+                if (generation !== this.marketDataGeneration) return;
                 this.silverHistoryError = '网络请求失败: ' + (error.response?.data?.message || error.message);
             } finally {
                 this.loading.silverHistory = false;

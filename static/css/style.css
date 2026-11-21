@@ -213,6 +213,18 @@ body {
     margin-right: 10px;
 }
 
+.market-settings .form-control {
+    display: block;
+    width: 100%;
+    max-width: 480px;
+    margin: 12px 0;
+}
+
+.market-settings p {
+    line-height: 1.7;
+    margin: 12px 0;
+}
+
 .push-config-card > p {
     color: #6c757d;
     line-height: 1.55;

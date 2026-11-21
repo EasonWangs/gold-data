@@ -27,7 +27,7 @@
                     :key="tab.id"
                     class="tab"
                     :class="{ active: activeTab === tab.id }"
-                    @click="activeTab = tab.id"
+                    @click="selectTab(tab.id)"
                 >
                     {{ tab.name }}
                 </button>
@@ -175,6 +175,41 @@
 
                     <div v-if="silverHistoryError" class="error">
                         {{ silverHistoryError }}
+                    </div>
+                </div>
+
+                <div v-if="activeTab === 'market'" class="market-settings">
+                    <h3>⚙️ 行情设置</h3>
+                    <p>选择价格查询和定时推送的数据获取方式，保存后自动生效，无需重启服务。</p>
+                    <div class="card">
+                        <label for="market-admin-token"><strong>🔐 管理令牌</strong></label>
+                        <input id="market-admin-token" v-model="adminToken"
+                            @input="marketConfigLoaded = false" @change="loadMarketConfig"
+                            type="password" class="form-control" placeholder="输入 GOLD_ADMIN_TOKEN" autocomplete="off">
+                        <p>令牌仅保存在当前浏览器内存中。</p>
+                    </div>
+                    <div class="card">
+                        <p v-if="marketConfigLoaded">
+                            <strong>当前生效：</strong>{{ currentMarketProvider === 'akshare' ? 'AkShare' : '直连上金所' }}
+                            · {{ marketConfigSource === 'saved' ? '已保存设置' : '初始设置' }}
+                        </p>
+                        <p v-else>输入管理令牌并读取当前设置后，即可切换。</p>
+                        <label for="market-provider"><strong>数据获取方式</strong></label>
+                        <select id="market-provider" v-model="marketProvider" class="form-control"
+                            :disabled="!marketConfigLoaded || loading.marketConfig">
+                            <option value="direct">直连上金所</option>
+                            <option value="akshare">AkShare</option>
+                        </select>
+                        <p>两种方式使用同一上金所数据源，均保留请求超时保护。切换后会重新获取行情；已经开始的请求按原设置完成。</p>
+                        <button class="btn" @click="loadMarketConfig" :disabled="loading.marketConfig || !adminToken">读取当前设置</button>
+                        <button class="btn btn-success" @click="saveMarketConfig"
+                            :disabled="loading.marketConfig || !adminToken || !marketConfigLoaded">
+                            {{ loading.marketConfig ? '处理中...' : '保存并切换' }}
+                        </button>
+                        <div v-if="marketConfigMessage" role="status"
+                            :class="marketConfigMessage.type === 'success' ? 'success' : 'error'">
+                            {{ marketConfigMessage.text }}
+                        </div>
                     </div>
                 </div>
 

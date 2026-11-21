@@ -49,7 +49,7 @@ def _load_akshare():
 
 
 def configure_provider(value=None):
-    """Freeze one provider per service instance and fail early on bad installs."""
+    """Validate a service snapshot before startup or a live provider switch."""
     provider = get_provider(value)
     if provider == 'akshare':
         _load_akshare()

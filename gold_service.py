@@ -16,7 +16,9 @@ import math
 import os
 from concurrent.futures import Future
 from functools import wraps
-from flask import Flask, jsonify, request
+from flask import Flask, g, has_request_context, jsonify, request
+from werkzeug.local import LocalProxy
+from market_config import MarketServiceManager
 from datetime import datetime, time as clock_time, timedelta
 from zoneinfo import ZoneInfo
 from push_service import (
@@ -361,8 +363,8 @@ def require_admin_token(view):
 
 class GoldService:
     def __init__(self, provider=None):
-        # Changing the deployment environment requires restarting both services.
-        # Each instance keeps one provider and its own caches for its lifetime.
+        # The manager replaces this whole instance after a runtime config change.
+        # An in-flight request keeps its provider and caches until it finishes.
         self.data_provider = sge_client.configure_provider(provider)
         self.webhook_url = None
         self.link_url = primary_link_url()
@@ -917,8 +919,20 @@ class GoldService:
             logger.error("❌ 推送测试失败")
         return result
 
-# 初始化服务
-gold_service = GoldService()
+# Resolve once per HTTP request so its data, indicators and provider metadata
+# use the same snapshot. Scheduler methods bind one instance for the whole job.
+market_service_manager = MarketServiceManager(GoldService)
+
+
+def current_gold_service():
+    if has_request_context():
+        if 'market_service' not in g:
+            g.market_service = market_service_manager.current()
+        return g.market_service
+    return market_service_manager.current()
+
+
+gold_service = LocalProxy(current_gold_service)
 logger.info('行情获取方式: %s', gold_service.data_provider)
 
 
@@ -2112,6 +2126,30 @@ def api_stop_service():
     return scheduler_control_response()
 
 
+@app.route('/api/market/config', methods=['GET', 'PUT'])
+@require_admin_token
+def api_market_config():
+    """Persist a provider change without restarting Web or the scheduler."""
+    try:
+        if request.method == 'GET':
+            config = market_service_manager.config()
+        else:
+            config = market_service_manager.update(request.get_json(silent=True))
+        return jsonify({
+            'status': 'success',
+            'config': config,
+            'message': '行情获取方式已保存，后续请求与定时推送自动使用新设置。',
+            'timestamp': market_timestamp(),
+        })
+    except ValueError as error:
+        return jsonify({'status': 'error', 'message': str(error)}), 400
+    except RuntimeError as error:
+        return jsonify({'status': 'error', 'message': str(error)}), 503
+    except OSError:
+        logger.exception('保存行情配置失败')
+        return jsonify({'status': 'error', 'message': '保存失败，请检查数据卷写入权限和剩余空间。'}), 500
+
+
 @app.route('/api/push/config', methods=['GET', 'PUT'])
 @require_admin_token
 def api_push_config():
@@ -2291,6 +2329,7 @@ def api_info():
             '/api/gold/*': '黄金价格API',
             '/api/silver/*': '白银价格API',
             '/api/market/session': '交易时段与交易日归属',
+            '/api/market/config': '行情获取方式设置（需管理令牌）',
             '/api/service/status': '推送调度说明（需管理令牌）',
             '/api/push/*': '推送功能',
             '/api/info': '服务信息'

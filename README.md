@@ -20,9 +20,10 @@ docker compose up -d --build
 
 完整的 NAS、反向代理和更新说明见 [NAS_DEPLOYMENT.md](NAS_DEPLOYMENT.md)。
 
-行情支持 `direct`（默认直连上金所）和 `akshare` 两种获取方式。在 `.env` 设置
-`GOLD_SGE_PROVIDER=akshare` 后重建 Web 与 scheduler 容器即可切换；`/api/info` 的
-`data_provider` 显示生效配置。两种方式保留相同的连接/读取超时、缓存和接口字段。
+行情支持 `direct`（默认直连上金所）和 `akshare` 两种获取方式。在后台「行情设置」
+输入管理令牌、选择方式并点击「保存并切换」，后续查询与定时推送自动生效，无需修改
+环境变量或重启容器。`/api/info` 的 `data_provider` 显示生效配置。两种方式保留相同的
+连接/读取超时、缓存和接口字段；`GOLD_SGE_PROVIDER` 仅作为尚未保存配置时的初始值。
 
 ### 安装依赖
 使用 Python 3.11.5 或以上版本；Docker 镜像使用 Python 3.12。

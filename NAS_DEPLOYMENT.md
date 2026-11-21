@@ -109,28 +109,30 @@ AkShare 已固定为 `1.20.65`，避免重新构建时因接口改名漂移。�
 
 ## 7. 切换行情获取方式
 
-在 NAS 项目的 `.env` 中设置 `GOLD_SGE_PROVIDER`：
+首次更新到支持后台切换的镜像后，打开后台首页的「行情设置」：
+
+1. 输入现有的 `GOLD_ADMIN_TOKEN`，页面自动读取当前设置。
+2. 选择「直连上金所」或「AkShare」。
+3. 点击「保存并切换」，看到成功提示即可。以后切换无需再修改环境变量、重启或重建容器。
 
 | 值 | 获取方式 |
 | --- | --- |
 | `direct`（默认） | Requests 直接访问上金所；启动时不导入 AkShare。 |
 | `akshare` | 使用固定版本 AkShare 的 `spot_realtime_sge` 与 `spot_hist_sge`，由 SDK 获取并解析同一上金所数据源。 |
 
-例如切换到 AkShare：
-
-```env
-GOLD_SGE_PROVIDER=akshare
-```
-
-使用本仓库源码构建时，更新代码并重建两个服务：
+第一次安装本功能时，Web 和 scheduler 都需更新到同一新版本。使用本仓库源码构建：
 
 ```bash
 docker compose up -d --build --force-recreate web scheduler
 curl http://127.0.0.1:5080/api/info
 ```
 
-若在 NAS 界面直接创建容器，先下载包含此功能的新镜像，在 Web 和 scheduler 两个容器的环境变量中同时设置该值，再重建容器。单独执行 `docker restart` 不会应用修改后的环境变量。切回直连时将值改为 `direct` 并同样重建。
+若在 NAS 界面直接创建容器，第一次先拉取新镜像并重建 Web 和 scheduler，确保两者挂载同一个 `/app/data` 数据卷。后续切换全部通过页面操作。Compose 已共享此目录；不要只更新 Web 而保留旧版 scheduler。
 
-`/api/info` 的 `data_provider` 应显示所选值，并列出 `supported_data_providers`；实时和历史成功响应也包含 `data_provider`。如果缺少这些字段，说明当前访问的仍是旧版后端或代理目标没有更新。每个进程在启动时固定获取方式，切换后使用新缓存；没有按请求查询参数切换或失败后自动切换。
+配置以原子替换方式保存为 `/app/data/market_data.json`，默认与 `GOLD_PUSH_CONFIG_PATH` 指定文件同目录；可用 `GOLD_MARKET_CONFIG_PATH` 指定路径，但 Web 与 scheduler 必须指向同一个共享文件。已保存的设置优先于环境变量 `GOLD_SGE_PROVIDER`，容器重启后仍保留。未保存设置时才使用环境变量的初始值（默认 `direct`）。
 
-AkShare 模式要求安装 `requirements.txt` 指定的依赖（Python 至少 3.11.5，镜像使用 3.12）。不兼容的旧 SDK 或错误配置会在启动时明确报错，不退回到无超时请求。若旧版日志显示 `spot_quotations_sge` 属性不存在，是旧调用名称与新版 AkShare 不兼容；本版本已使用新版实时接口名称。
+Web 的下一次请求和 scheduler 的下一次推送会自动读取新配置，并使用全新缓存；正在处理的请求/推送保留原方式直到完成，其结果不会写回新的缓存实例。同一请求中的历史数据、指标和方式标识始终使用同一实例。配置读取异常时保留最近有效设置并记录日志；保存失败或 SDK 不可用时页面会报错，原有配置继续有效。
+
+`/api/info` 的 `data_provider` 显示当前生效方式；管理接口 `GET /api/market/config` 可查看设置，`PUT /api/market/config` 接收 `{"provider":"akshare"}` 或 `{"provider":"direct"}`，两者均要求 `X-Admin-Token`。页面保存后会清除已展示的旧行情，并忽略切换前尚未完成的页面刷新结果，重新刷新价格即可查看新方式的数据。
+
+AkShare 模式要求安装 `requirements.txt` 指定的依赖（Python 至少 3.11.5，镜像使用 3.12）。不兼容的旧 SDK 会阻止保存该选项，不退回到无超时请求。若旧版日志显示 `spot_quotations_sge` 属性不存在，是旧调用名称与新版 AkShare 不兼容；本版本已使用新版实时接口名称。
