@@ -4,9 +4,8 @@
 整合黄金价格API和钉钉推送功能的统一服务
 """
 
-import akshare as ak
+import sge_client
 import pandas as pd
-import requests
 import schedule
 import time
 import threading
@@ -15,6 +14,7 @@ import argparse
 import hmac
 import math
 import os
+from concurrent.futures import Future
 from functools import wraps
 from flask import Flask, jsonify, request
 from datetime import datetime, time as clock_time, timedelta
@@ -50,6 +50,8 @@ service_status = {
 ADMIN_TOKEN_ENV = 'GOLD_ADMIN_TOKEN'
 CORS_ALLOWED_ORIGINS_ENV = 'GOLD_CORS_ALLOWED_ORIGINS'
 REALTIME_CACHE_TTL_SECONDS = 60
+# Bound how long a worker waits for another worker's refresh of the same key.
+CACHE_REFRESH_WAIT_SECONDS = 20
 # 末尾报价相对前一有效报价的最大允许偏差（1.36%）。
 REALTIME_TERMINAL_OUTLIER_MAX_CHANGE_RATIO = 0.0136
 HISTORICAL_TRADING_CACHE_TTL_SECONDS = 30 * 60
@@ -89,7 +91,7 @@ MIN_BACKTEST_ORDER_AMOUNT = 1_000.0
 BACKTEST_ORDER_AMOUNT_STEP = 1_000.0
 MAX_BACKTEST_CASH = 100_000_000.0
 API_VERSION = '2.3.0'
-DATA_SOURCE = '上海黄金交易所行情（经 AkShare 获取）'
+DATA_SOURCE = '上海黄金交易所行情'
 SGE_SESSION_SCHEDULE = (
     {'name': 'night', 'label': '夜盘', 'time': '20:00–次日 02:30'},
     {'name': 'day_morning', 'label': '日盘上午', 'time': '09:00–11:30'},
@@ -364,36 +366,66 @@ class GoldService:
         self.push_manager = push_manager
         self._data_cache = {}
         self._cache_lock = threading.Lock()
+        self._cache_inflight = {}
 
     def refresh_push_link_url(self):
         """Refresh the URL embedded in market messages from admin settings."""
         self.link_url = primary_link_url()
 
-    def _get_cached_data(self, cache_key, loader, ttl_seconds, on_refresh=None, force_refresh=False):
-        """Return fresh cached data and serialize cache misses per process."""
-        now = time.monotonic()
+    def _get_cached_data(self, cache_key, loader, ttl_seconds, on_refresh=None,
+                         force_refresh=False, source=None, cache_if=None):
+        """Coalesce refreshes per key/source, doing all slow work outside the lock.
+
+        ``cache_if`` and ``on_refresh`` only inspect/update cache metadata and run
+        under the lock. A forced refresh skips stored data but can join an active
+        refresh. Waiters share its result or error; failures aren't cached.
+        """
+        flight_key = (cache_key, id(source))
         with self._cache_lock:
             cached = self._data_cache.get(cache_key)
             if (
                 not force_refresh
                 and
                 cached
+                and cached.get('source') is source
                 and cached['ttl_seconds'] == ttl_seconds
-                and now - cached['cached_at'] < ttl_seconds
+                and time.monotonic() - cached['cached_at'] < ttl_seconds
+                and (cache_if is None or cache_if())
             ):
                 logger.debug('使用 %s 缓存数据', cache_key)
                 return cached['data']
 
+            pending = self._cache_inflight.get(flight_key)
+            owns_refresh = pending is None
+            if owns_refresh:
+                pending = Future()
+                self._cache_inflight[flight_key] = pending
+
+        if not owns_refresh:
+            return pending.result(timeout=CACHE_REFRESH_WAIT_SECONDS)
+
+        try:
             data = loader()
-            if data is not None:
-                if on_refresh:
-                    on_refresh()
-                self._data_cache[cache_key] = {
-                    'cached_at': time.monotonic(),
-                    'ttl_seconds': ttl_seconds,
-                    'data': data,
-                }
+            with self._cache_lock:
+                if data is not None and (cache_if is None or cache_if()):
+                    if on_refresh:
+                        on_refresh()
+                    self._data_cache[cache_key] = {
+                        'cached_at': time.monotonic(),
+                        'ttl_seconds': ttl_seconds,
+                        'data': data,
+                        'source': source,
+                    }
+            pending.set_result(data)
             return data
+        except BaseException as error:
+            # Even an interrupted loader must release all waiters. Re-raise so
+            # process-level interrupts retain their original semantics.
+            pending.set_exception(error)
+            raise
+        finally:
+            with self._cache_lock:
+                del self._cache_inflight[flight_key]
 
     def get_real_time_sge_price(self, symbol):
         """获取指定上海黄金交易所品种的实时行情（缓存 60 秒）"""
@@ -401,7 +433,7 @@ class GoldService:
             return self._get_cached_data(
                 f'spot_quotations_sge:{symbol}',
                 lambda: drop_terminal_realtime_outlier(
-                    ak.spot_quotations_sge(symbol=symbol),
+                    sge_client.spot_quotations_sge(symbol=symbol),
                     symbol,
                 ),
                 REALTIME_CACHE_TTL_SECONDS,
@@ -415,7 +447,7 @@ class GoldService:
         try:
             spot_hist_sge_df = self._get_cached_data(
                 f'spot_hist_sge:{symbol}',
-                lambda: ak.spot_hist_sge(symbol=symbol),
+                lambda: sge_client.spot_hist_sge(symbol=symbol),
                 historical_cache_ttl_seconds(),
                 on_refresh=lambda: self._evict_cached_indicators(symbol),
                 force_refresh=force_refresh,
@@ -429,12 +461,21 @@ class GoldService:
             logger.error(f"获取 {symbol} 历史价格失败: {e}")
             return None
 
-    def get_cached_indicators(self, symbol, indicator_key, loader):
-        """Cache derived daily indicators for the same period as history data."""
+    def get_cached_indicators(self, symbol, indicator_key, loader, *, history_data):
+        """Only cache indicators while their exact history snapshot is current.
+
+        Refreshing history may overlap an old calculation, or happen before it
+        starts. Source identity keeps both cases from repopulating stale results
+        or making a new-history caller wait for an old-history calculation.
+        """
         return self._get_cached_data(
             f'indicators:{symbol}:{indicator_key}',
             loader,
             historical_cache_ttl_seconds(),
+            source=history_data,
+            cache_if=lambda: history_data is not None and self._data_cache.get(
+                f'spot_hist_sge:{symbol}', {}
+            ).get('data') is history_data,
         )
 
     def _evict_cached_indicators(self, symbol):
@@ -1197,6 +1238,7 @@ def sma_indicator_response(symbol, metal_name, unit):
             symbol,
             indicator_key,
             lambda: calculate_sma_indicators(history_data, windows),
+            history_data=history_data,
         )
         if indicators.empty:
             return jsonify({
@@ -1301,6 +1343,7 @@ def kdj_indicator_response(symbol, metal_name, unit):
             symbol,
             'kdj:9,3,3',
             lambda: calculate_kdj_indicators(history_data),
+            history_data=history_data,
         )
         if indicators.empty:
             return jsonify({
@@ -1384,6 +1427,7 @@ def macd_indicator_response(symbol, metal_name, unit):
             symbol,
             'macd:12,26,9',
             lambda: calculate_macd_indicators(history_data),
+            history_data=history_data,
         )
         if indicators.empty:
             return jsonify({

@@ -56,6 +56,7 @@ python gold_service.py --scheduler-only
 - 🥈 **白银**: 上金所 `Ag99.99` 实时分时与交易日日线（元/千克）
 - 🌙 **夜盘语义**: 夜盘 20:00 至次日 02:30；夜盘与其后的日盘同属一个交易日。周五夜盘归入下周一。节假日以源站实际行情为准。
 - 🧊 **源站保护**: 实时分时缓存 60 秒；历史日线及技术指标在工作日日间刷新窗口缓存 30 分钟，其余时段缓存 12 小时。
+- ⏱️ **请求保护**: 上金所连接超时 3.05 秒、读取空闲超时 10 秒；同一行情并发刷新合并，其他品种和行情类型互不阻塞，等待同一刷新最多 20 秒。
 - ⚠️ **实时异常处置**: 因上游数据源偶发在分钟行情末尾返回异常占位报价，接口会将末尾 1 分钟报价与前一有效报价比较；偏差达到或超过 1.36% 时丢弃该条，避免错误值进入接口响应和缓存。
 - 🔌 **标准接口**: RESTful API 设计，JSON 格式响应
 
@@ -326,7 +327,7 @@ curl -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/service/sta
 
 | 层次 | 技术栈 | 说明 |
 |------|--------|------|
-| **后端** | Flask + akshare + schedule | Web框架 + 数据获取 + 定时任务 |
+| **后端** | Flask + Requests + pandas + schedule | Web框架 + 上金所行情获取与计算 + 定时任务 |
 | **前端** | 原生JS + CSS3 | 响应式Web界面 |
 | **推送** | 钉钉、飞书机器人 API | 消息推送服务 |
 | **部署** | 单文件运行 | 无复杂依赖 |
@@ -347,7 +348,7 @@ curl -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/service/sta
 
 | 项目 | 说明 |
 |------|------|
-| 🌐 **网络要求** | 确保能访问已启用的钉钉或飞书 API 与 AkShare 可用的上金所行情源 |
+| 🌐 **网络要求** | 确保能访问已启用的钉钉或飞书 API 与上金所行情源 |
 | ⚙️ **配置检查** | 首次使用请在后台填写机器人 Webhook 地址 |
 | 🔐 **管理令牌** | 必须设置 `GOLD_ADMIN_TOKEN` 才能手动或测试推送 |
 | ⏰ **时区设置** | 推送时间固定使用 Asia/Shanghai（09:02 / 13:32 / 15:32） |
@@ -358,7 +359,7 @@ curl -H "X-Admin-Token: $GOLD_ADMIN_TOKEN" http://localhost:5080/api/service/sta
 
 ### 常见问题
 - **推送失败**: 检查webhook地址、机器人安全设置
-- **数据异常**: 更新akshare库版本 `pip install --upgrade akshare`
+- **数据异常**: 查看容器日志中的上金所超时、HTTP 或解析错误；排查步骤见 [NAS_DEPLOYMENT.md](NAS_DEPLOYMENT.md)。
 - **端口冲突**: 修改 `gold_service.py` 中的端口号
 - **依赖缺失**: 运行 `pip install -r requirements.txt`
 
@@ -397,6 +398,6 @@ python gold_service.py --scheduler-only
 
 ---
 
-**🏅 数据来源**: 上海黄金交易所 Au99.99 / Ag99.99（经 AkShare 获取）
-**🔧 技术栈**: Flask + akshare + 钉钉API
+**🏅 数据来源**: 上海黄金交易所 Au99.99 / Ag99.99（直接获取）
+**🔧 技术栈**: Flask + Requests + pandas + 钉钉API
 **📅 版本**: 2.3.0 (2026-07-29)

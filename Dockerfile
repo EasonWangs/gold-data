@@ -2,6 +2,7 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    PYTHONFAULTHANDLER=1 \
     PIP_NO_CACHE_DIR=1 \
     TZ=Asia/Shanghai
 
@@ -28,5 +29,6 @@ USER app
 
 EXPOSE 5080
 
-# The Compose file provides the web and scheduler commands explicitly.
-CMD ["python", "gold_service.py"]
+# Also serve correctly when the NAS creates a container directly from this image.
+# Keep connection/buffer use bounded; this service only accepts small JSON bodies.
+CMD ["waitress-serve", "--host=0.0.0.0", "--port=5080", "--threads=4", "--connection-limit=64", "--backlog=64", "--channel-timeout=60", "--max-request-body-size=1048576", "--outbuf-high-watermark=1048576", "gold_service:app"]

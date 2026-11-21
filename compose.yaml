@@ -5,12 +5,19 @@ services:
     image: gold-data:latest
     container_name: gold-data-web
     restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     env_file:
       - .env
     environment:
       TZ: ${TZ:-Asia/Shanghai}
       GOLD_PUSH_CONFIG_PATH: /app/data/push_channels.json
-    command: ["waitress-serve", "--host=0.0.0.0", "--port=5080", "gold_service:app"]
+    # Use the image's production command, shared with direct NAS deployments.
     ports:
       - "${GOLD_HOST_PORT:-5080}:5080"
     volumes:
@@ -30,6 +37,13 @@ services:
     image: gold-data:latest
     container_name: gold-data-scheduler
     restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     env_file:
       - .env
     environment:

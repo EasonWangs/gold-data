@@ -1,6 +1,6 @@
 {
   "note": "此文件是推送规则说明样例；当前运行时规则由 gold_service.py 的 SCHEDULED_PUSH_TIMES 统一定义，避免配置与实现漂移。",
-  "data_source": "上海黄金交易所 Au99.99（经 AkShare 获取）",
+  "data_source": "上海黄金交易所 Au99.99",
   "timezone": "Asia/Shanghai",
   "scheduled_pushes": {
     "day_opening": {

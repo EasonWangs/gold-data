@@ -789,7 +789,7 @@ class SmaIndicatorApiTests(unittest.TestCase):
         service = gold_service.GoldService()
         service._data_cache.clear()
         history = daily_history([1, 2, 3])
-        with patch.object(gold_service.ak, 'spot_hist_sge', return_value=history) as source:
+        with patch.object(gold_service.sge_client, 'spot_hist_sge', return_value=history) as source:
             service.get_historical_sge_price(gold_service.GOLD_SYMBOL, days=None)
             service.get_historical_sge_price(gold_service.GOLD_SYMBOL, days=None)
 
@@ -799,7 +799,7 @@ class SmaIndicatorApiTests(unittest.TestCase):
         service = gold_service.GoldService()
         first = daily_history([1, 2])
         refreshed = daily_history([1, 2, 3])
-        with patch.object(gold_service.ak, 'spot_hist_sge', side_effect=[first, refreshed]) as source:
+        with patch.object(gold_service.sge_client, 'spot_hist_sge', side_effect=[first, refreshed]) as source:
             service.get_historical_sge_price(gold_service.GOLD_SYMBOL, days=None)
             data = service.get_historical_sge_price(
                 gold_service.GOLD_SYMBOL,
@@ -838,15 +838,19 @@ class SmaIndicatorApiTests(unittest.TestCase):
             return_value=history,
         ) as calculator:
             now.return_value = datetime(2026, 7, 27, 10, 0, tzinfo=gold_service.MARKET_TIMEZONE)
+            with patch.object(gold_service.sge_client, 'spot_hist_sge', return_value=history):
+                service.get_historical_sge_price(gold_service.GOLD_SYMBOL, days=None)
             service.get_cached_indicators(
                 gold_service.GOLD_SYMBOL,
                 'sma:5',
                 lambda: gold_service.calculate_sma_indicators(history, [5]),
+                history_data=history,
             )
             service.get_cached_indicators(
                 gold_service.GOLD_SYMBOL,
                 'sma:5',
                 lambda: gold_service.calculate_sma_indicators(history, [5]),
+                history_data=history,
             )
 
         self.assertEqual(calculator.call_count, 1)
@@ -860,7 +864,7 @@ class SmaIndicatorApiTests(unittest.TestCase):
             'data': daily_history([1]),
         }
         with patch.object(
-            gold_service.ak,
+            gold_service.sge_client,
             'spot_hist_sge',
             return_value=daily_history([1, 2]),
         ):
@@ -872,7 +876,7 @@ class SmaIndicatorApiTests(unittest.TestCase):
         service = gold_service.GoldService()
         raw_quotes = realtime_quotes([770.0, 771.2, 880.0])
         with patch.object(
-            gold_service.ak,
+            gold_service.sge_client,
             'spot_quotations_sge',
             return_value=raw_quotes,
         ) as source:
